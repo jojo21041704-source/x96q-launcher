@@ -24,9 +24,10 @@
   --pin: #F2C46D;
   --pad-x: 68px;
 
-  --t-fast: 120ms;
-  --t-base: 170ms;
-  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* Focus et glissement : 105 ms, courbe sèche (départ immédiat, arrivée douce). */
+  --t-fast: 105ms;
+  --t-base: 105ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -55,10 +56,13 @@ body { position: relative; }
   width: 1920px;
   height: 1080px;
   opacity: 0;
-  transition: opacity 320ms linear;
+  transition: opacity 140ms linear;
   will-change: opacity;
 }
 .halo.is-visible { opacity: 1; }
+/* Les halos sont des <canvas> 320×180 étirés par le compositeur : un changement de couleur
+   redessine 58 000 pixels hors écran au lieu de 2 millions, puis seule l'opacité bascule. */
+canvas.halo { display: block; }
 /* Voile fixe peint une seule fois : garantit un noir profond sous les rangées. */
 .veil {
   position: absolute;
@@ -165,8 +169,13 @@ body { position: relative; }
   top: 84px;
   width: 780px;
 }
-.hero-copy.is-entering { animation: hero-in var(--t-base) var(--ease); }
+.hero-copy.is-entering   { animation: hero-in   var(--t-base) var(--ease); }
+.hero-copy.is-entering-b { animation: hero-in-b var(--t-base) var(--ease); }
 @keyframes hero-in {
+  from { opacity: 0.2; transform: translate3d(0, 8px, 0); }
+  to   { opacity: 1;   transform: translate3d(0, 0, 0); }
+}
+@keyframes hero-in-b {   /* copie : permet de relancer l'animation sans reflow */
   from { opacity: 0.2; transform: translate3d(0, 8px, 0); }
   to   { opacity: 1;   transform: translate3d(0, 0, 0); }
 }
@@ -289,7 +298,8 @@ body { position: relative; }
   border-radius: 20px;
   background: linear-gradient(145deg, #171B26 0%, #0D1017 100%);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  border-top-color: rgba(255, 255, 255, 0.18);   /* reflet supérieur sans box-shadow */
+  box-shadow: none;
   overflow: visible;
   opacity: 0.72;
   transform: scale3d(1, 1, 1);
@@ -309,7 +319,7 @@ body { position: relative; }
   transition: opacity var(--t-fast) linear;
   pointer-events: none;
 }
-.tile-face:before { box-shadow: 0 24px 50px rgba(0, 0, 0, 0.9), 0 0 35px rgba(255, 255, 255, 0.15); }
+.tile-face:before { display: none; }   /* plus d'ombre floue : seule la bordure blanche nette reste */
 .tile-face:after  { border: 3.5px solid #FFFFFF; }
 
 /* Halo coloré diffus derrière l'icône (accentColor), peint une fois. */
@@ -329,7 +339,7 @@ body { position: relative; }
   top: 50%;
   display: block;
   object-fit: cover;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: none;
 }
 .row-dock .tile-icon { width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 18px; }
 .row-apps .tile-icon { width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 15px; }
@@ -379,6 +389,9 @@ body { position: relative; }
 .tile.is-focused .tile-label { color: #FFFFFF; font-weight: 700; }
 .row-dock .tile.is-focused .tile-label { transform: translate3d(0, 5px, 0); }
 .row-apps .tile.is-focused .tile-label { transform: translate3d(0, 4px, 0); }
+
+.row-track { will-change: transform; }
+.tile.is-focused .tile-face { will-change: transform; }
 
 .tile.is-pressed .tile-face { transform: scale3d(1.03, 1.03, 1); transition-duration: var(--t-fast); }
 

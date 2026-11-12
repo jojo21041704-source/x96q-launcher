@@ -21,6 +21,9 @@ import android.webkit.JavascriptInterface
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -28,43 +31,67 @@ import java.util.concurrent.Executors
 
 /**
  * Pont exposé sous `window.AndroidBridge`.
- * Les méthodes @JavascriptInterface tournent sur un thread dédié de la WebView, jamais sur le thread UI.
+ *
+ * Démarrage à froid sans attente :
+ *  - le JS affiche d'abord sa copie `localStorage` (cached_apps_v1), puis appelle
+ *    [requestApps] avec la signature de cette copie ; l'appel rend la main immédiatement ;
+ *  - le scan PackageManager tourne sur un thread d'arrière-plan dédié, jamais sur le thread UI ;
+ *  - les icônes déjà converties sont relues depuis un cache disque (une seule conversion PNG par
+ *    version d'application) ;
+ *  - `window.onAppsUpdated({sig, apps})` n'est appelé que si la liste a changé ou si le JS n'avait rien.
+ *
+ * @param pushJs exécute un script dans la WebView courante (fourni par MainActivity, thread UI).
  */
-class AndroidBridge(private val activity: Activity) {
+class AndroidBridge(
+    private val activity: Activity,
+    private val pushJs: (String) -> Unit
+) {
 
     private val pm: PackageManager = activity.packageManager
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val lock = Any()
+    private val scanExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val netExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val bannerCache = ConcurrentHashMap<String, String>()
+    private val iconDir: File by lazy { File(activity.cacheDir, "icons").apply { mkdirs() } }
 
-    @Volatile private var cachedJson: String? = null
+    @Volatile private var cachedJson: String? = null      // tableau d'apps (API synchrone historique)
+    @Volatile private var cachedSig: String? = null
+    @Volatile private var deliveredSig: String? = null    // ce que le JS affiche actuellement
 
-    fun warmUp() { executor.execute { getInstalledApps() } }
+    /** Lance un scan dès onCreate, en parallèle du chargement de la WebView. */
+    fun warmUp() { scanExecutor.execute { scan() } }
 
-    fun invalidateCache() {
-        synchronized(lock) { cachedJson = null }
+    /** Installation / désinstallation : rescan en tâche de fond, notification seulement si nécessaire. */
+    fun onPackagesChanged() {
         bannerCache.clear()
-        warmUp()
-    }
-
-    fun shutdown() { executor.shutdownNow() }
-
-    /**
-     * [{ name, packageName, isTv, category, accentColor: "#RRGGBB", icon: "data:image/png;base64,…" }]
-     * Icônes 128×128 ARGB_8888, coins arrondis, adaptatives rendues avec leurs deux calques.
-     */
-    @JavascriptInterface
-    fun getInstalledApps(): String {
-        cachedJson?.let { return it }
-        synchronized(lock) {
-            cachedJson?.let { return it }
-            val json = try { buildAppsJson() } catch (t: Throwable) {
-                Log.e(TAG, "getInstalledApps failed", t); "[]"
-            }
-            cachedJson = json
-            return json
+        scanExecutor.execute {
+            val (sig, _) = scan()
+            if (sig != deliveredSig) deliver()
         }
     }
+
+    fun shutdown() {
+        scanExecutor.shutdownNow()
+        netExecutor.shutdownNow()
+    }
+
+    // ------------------------------------------------------------------ API JavaScript
+
+    /**
+     * Non bloquant. [knownSignature] = signature de la liste affichée par le JS ("" si aucune).
+     * Notifie `window.onAppsUpdated` uniquement si la liste réelle diffère.
+     */
+    @JavascriptInterface
+    fun requestApps(knownSignature: String?) {
+        deliveredSig = knownSignature?.takeIf { it.isNotEmpty() }
+        scanExecutor.execute {
+            val (sig, _) = scan()
+            if (sig != deliveredSig) deliver()
+        }
+    }
+
+    /** API synchrone conservée pour compatibilité (n'est plus utilisée au démarrage). */
+    @JavascriptInterface
+    fun getInstalledApps(): String = cachedJson ?: scan().second
 
     /** Bannière Android TV (16:9, 480×270) en data URI, ou "" si l'application n'en a pas. */
     @JavascriptInterface
@@ -100,7 +127,132 @@ class AndroidBridge(private val activity: Activity) {
             startSafely(Intent(Settings.ACTION_WIRELESS_SETTINGS).addFlags(flags))
     }
 
-    // ------------------------------------------------------------------ internes
+    /**
+     * Lit l'en-tête HTTP `Date` d'Open-Meteo (impossible depuis le JS : en-tête non exposé en CORS)
+     * et renvoie l'écart avec l'horloge du boîtier : `window.onNetworkTime(offsetMs)`.
+     * Utile au boot quand l'horloge interne n'est pas encore synchronisée. Jusqu'à 5 essais.
+     */
+    @JavascriptInterface
+    fun syncNetworkTime() {
+        netExecutor.execute {
+            for (attempt in 0 until 5) {
+                if (Thread.currentThread().isInterrupted) return@execute
+                try {
+                    val t0 = System.currentTimeMillis()
+                    val conn = URL(TIME_URL).openConnection() as HttpURLConnection
+                    conn.requestMethod = "GET"
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.useCaches = false
+                    conn.connect()
+                    val serverDate = conn.date
+                    conn.disconnect()
+                    val t1 = System.currentTimeMillis()
+                    if (serverDate > 0) {
+                        // L'en-tête est à la seconde près : on vise le milieu de la seconde et de l'aller-retour.
+                        val offset = serverDate + 500 + (t1 - t0) / 2 - t1
+                        pushJs("window.onNetworkTime && window.onNetworkTime($offset)")
+                        return@execute
+                    }
+                } catch (t: Throwable) {
+                    Log.i(TAG, "Network time unavailable (attempt ${attempt + 1})")
+                }
+                try { Thread.sleep(20_000) } catch (_: InterruptedException) { return@execute }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ Scan
+
+    private fun deliver() {
+        val json = cachedJson ?: return
+        val sig = cachedSig ?: return
+        deliveredSig = sig
+        // \u2028 / \u2029 sont valides en JSON mais pas dans un littéral JS ancien.
+        val payload = "{\"sig\":" + JSONObject.quote(sig) + ",\"apps\":" + json + "}"
+        pushJs("window.onAppsUpdated && window.onAppsUpdated(" +
+            payload.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029") + ")")
+    }
+
+    private data class Entry(val info: ResolveInfo, val isTv: Boolean, val updated: Long)
+
+    /**
+     * Retourne (signature, json). La signature (paquets + dates de mise à jour) se calcule en
+     * quelques millisecondes ; les icônes ne sont reconverties que pour les apps nouvelles ou mises à jour.
+     */
+    @Synchronized
+    private fun scan(): Pair<String, String> {
+        val entries = try { collect() } catch (t: Throwable) {
+            Log.e(TAG, "scan failed", t); emptyList()
+        }
+        val sig = entries.map { it.info.activityInfo.packageName + ":" + it.updated }.sorted()
+            .joinToString("|").hashCode().toString(16) + "-" + entries.size
+
+        if (sig == cachedSig) cachedJson?.let { return sig to it }
+
+        val apps = entries.map { e ->
+            val label = e.info.loadLabel(pm)?.toString()?.trim().orEmpty().ifEmpty { e.info.activityInfo.packageName }
+            label to e
+        }.sortedBy { it.first.lowercase(Locale.getDefault()) }
+
+        val array = JSONArray()
+        val keep = HashSet<String>()
+        for ((label, e) in apps) {
+            val pkg = e.info.activityInfo.packageName
+            val (accent, icon) = iconFor(e)
+            keep.add(iconFile(pkg).name)
+            array.put(JSONObject().apply {
+                put("name", label)
+                put("packageName", pkg)
+                put("isTv", e.isTv)
+                put("category", categoryOf(e.info.activityInfo.applicationInfo))
+                put("accentColor", accent)
+                put("icon", icon)
+            })
+        }
+        // Ménage : icônes d'applications désinstallées.
+        iconDir.listFiles()?.forEach { if (it.name !in keep) it.delete() }
+
+        val json = array.toString()
+        cachedJson = json
+        cachedSig = sig
+        return sig to json
+    }
+
+    private fun collect(): List<Entry> {
+        val self = activity.packageName
+        val map = LinkedHashMap<String, Entry>()
+        fun add(info: ResolveInfo, tv: Boolean) {
+            val pkg = info.activityInfo.packageName
+            if (pkg == self || map.containsKey(pkg)) return
+            val updated = try { pm.getPackageInfo(pkg, 0).lastUpdateTime } catch (_: Throwable) { 0L }
+            map[pkg] = Entry(info, tv, updated)
+        }
+        query(Intent.CATEGORY_LEANBACK_LAUNCHER).forEach { add(it, true) }
+        query(Intent.CATEGORY_LAUNCHER).forEach { add(it, false) }
+        return map.values.toList()
+    }
+
+    private fun iconFile(pkg: String) = File(iconDir, "$pkg.$ICON_CACHE_VERSION")
+
+    /** (accentColor, dataUri) : cache disque si la version de l'app n'a pas changé, sinon conversion. */
+    private fun iconFor(e: Entry): Pair<String, String> {
+        val pkg = e.info.activityInfo.packageName
+        val file = iconFile(pkg)
+        try {
+            if (file.exists()) {
+                val parts = file.readText().split('\n', limit = 3)
+                if (parts.size == 3 && parts[0] == e.updated.toString()) return parts[1] to parts[2]
+            }
+        } catch (_: Throwable) { }
+
+        val bitmap = extractIcon(e.info)
+        val accent = bitmap?.let { dominantColor(it) } ?: DEFAULT_ACCENT
+        val uri = bitmap?.let { toDataUri(it) } ?: ""
+        bitmap?.recycle()
+        try { file.writeText(e.updated.toString() + "\n" + accent + "\n" + uri) } catch (_: Throwable) { }
+        return accent to uri
+    }
 
     private fun startSafely(intent: Intent): Boolean {
         if (intent.resolveActivity(pm) == null) return false
@@ -110,40 +262,6 @@ class AndroidBridge(private val activity: Activity) {
             catch (e: SecurityException) { Log.w(TAG, "Not allowed to start $intent", e) }
         }
         return true
-    }
-
-    private fun buildAppsJson(): String {
-        val self = activity.packageName
-        val byPackage = LinkedHashMap<String, Pair<ResolveInfo, Boolean>>()
-
-        query(Intent.CATEGORY_LEANBACK_LAUNCHER).forEach {
-            val pkg = it.activityInfo.packageName
-            if (pkg != self) byPackage[pkg] = it to true
-        }
-        query(Intent.CATEGORY_LAUNCHER).forEach {
-            val pkg = it.activityInfo.packageName
-            if (pkg != self && !byPackage.containsKey(pkg)) byPackage[pkg] = it to false
-        }
-
-        val apps = byPackage.values.map { (info, isTv) ->
-            val label = info.loadLabel(pm)?.toString()?.trim().orEmpty().ifEmpty { info.activityInfo.packageName }
-            Triple(label, info, isTv)
-        }.sortedBy { it.first.lowercase(Locale.getDefault()) }
-
-        val array = JSONArray()
-        for ((label, info, isTv) in apps) {
-            val obj = JSONObject()
-            obj.put("name", label)
-            obj.put("packageName", info.activityInfo.packageName)
-            obj.put("isTv", isTv)
-            obj.put("category", categoryOf(info.activityInfo.applicationInfo))
-            val icon = extractIcon(info)
-            obj.put("accentColor", icon?.let { dominantColor(it) } ?: DEFAULT_ACCENT)
-            obj.put("icon", icon?.let { toDataUri(it) } ?: "")
-            icon?.recycle()
-            array.put(obj)
-        }
-        return array.toString()
     }
 
     /**
@@ -326,5 +444,7 @@ class AndroidBridge(private val activity: Activity) {
         private const val BANNER_W = 480
         private const val BANNER_H = 270
         private const val DEFAULT_ACCENT = "#4A5468"
+        private const val ICON_CACHE_VERSION = "v1"
+        private const val TIME_URL = "https://api.open-meteo.com/v1/forecast?latitude=33.92&longitude=-6.91&current_weather=true"
     }
 }

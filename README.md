@@ -91,15 +91,25 @@ Le natif appelle `window.onRemoteKey(nom, repeat)` pour chaque touche, et `windo
 
 ## Performance (Mali-G31)
 
-- Aucun `backdrop-filter` ni `filter: blur()`.
-- Seuls `transform` (`scale3d(1.09, 1.09, 1)`, `translate3d`) et `opacity` sont animés, en 120–180 ms.
-- Le canevas 1920×1080 est mis à l'échelle de l'écran réel (`fitStage`) : rien n'est coupé en 720p, 1080p ou 4K.
-- Tuiles « Dark Glass » homogènes : icône 76 px sur fond sombre et halo coloré pré-peint (aucune bannière blanche étirée).
-- Le halo d'ambiance n'est repeint qu'une fois la navigation posée, puis apparaît en fondu d'opacité.
+**Démarrage à froid**
+- Fenêtre et WebView peintes en `#050608` dès la première frame : ni flash blanc, ni trou.
+- `app.js` affiche immédiatement la dernière liste connue (`localStorage › cached_apps_v1` : noms, couleurs, icônes).
+- Le scan `PackageManager` tourne sur un thread d'arrière-plan lancé avant même la création de la WebView.
+  Les icônes déjà converties sont relues depuis `cacheDir/icons` : seule une app nouvelle ou mise à jour est reconvertie.
+- Le natif n'appelle `window.onAppsUpdated({sig, apps})` que si la signature (paquets + dates de mise à jour) diffère.
+- Page rechargée au retour si elle est vide ; WebView recréée si son processus de rendu est tué faute de mémoire.
+
+**Navigation à 60 FPS**
+- Focus et glissement en 105 ms, `cubic-bezier(0.16, 1, 0.3, 1)`, uniquement `transform` / `opacity`.
+- Aucune ombre floue sur les tuiles : seule la bordure blanche nette de 3,5 px.
+- Halo d'ambiance : deux `<canvas>` 320×180 étirés par le GPU ; un changement de couleur redessine
+  58 000 pixels hors écran (au lieu de 2 millions), après 110 ms d'immobilité, puis fondu d'opacité de 140 ms.
+- Déplacement du rail par simple calcul (index × pas) : aucune mesure DOM, aucun `localStorage` pendant la navigation.
 - CSS compatible avec les anciennes WebView d'Android 10 : ni `inset`, ni `gap` en flexbox.
-- Ombre et bordure de focus (`3px solid #FFFFFF`) pré-rendues dans des pseudo-éléments : seule leur opacité change.
-- Icônes 128 px (adaptatives rendues calque par calque) et couleur dominante calculées une fois au démarrage, puis mises en cache.
-- La teinte d'ambiance n'est repeinte qu'une fois la navigation arrêtée (140 ms).
+
+**Horloge**
+- Vérifiée chaque seconde ; si l'horloge du boîtier a plus de 90 s d'écart avec l'en-tête HTTP `Date`
+  d'Open-Meteo (lu côté natif), l'affichage est corrigé automatiquement.
 
 ## Aperçu dans un navigateur
 

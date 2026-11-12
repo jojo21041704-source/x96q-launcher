@@ -14,19 +14,28 @@ import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 
 /**
  * Coque native : WebView plein écran + interception TOTALE de la télécommande.
  *
- * Aucune touche directionnelle n'atteint la WebView : elle ne peut donc ni voler,
- * ni bloquer le focus. Chaque touche est relayée à `window.onRemoteKey(nom, repeat)`.
+ * Démarrage à froid :
+ *  - fenêtre et WebView peintes en #050608 dès la première frame (thème + setBackgroundColor) ;
+ *  - le scan des applications démarre en arrière-plan AVANT la création de la WebView ;
+ *  - la page s'affiche depuis son cache localStorage sans attendre le natif.
  *
+ * Résilience : page rechargée au retour si elle est vide, WebView recréée si son
+ * processus de rendu meurt (manque de mémoire sur le H313).
+ *
+ * Touches relayées à `window.onRemoteKey(nom, repeat)` :
  *   Haut/Bas/Gauche/Droite → "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
  *   OK / Entrée            → "Enter"      (au relâchement, si pas d'appui long)
  *   OK maintenu 550 ms     → "LongEnter"  (épingler / retirer du dock)
@@ -35,6 +44,7 @@ import android.webkit.WebViewClient
  */
 class MainActivity : Activity() {
 
+    private lateinit var root: FrameLayout
     private lateinit var webView: WebView
     private lateinit var bridge: AndroidBridge
     private val handler = Handler(Looper.getMainLooper())
@@ -52,15 +62,14 @@ class MainActivity : Activity() {
 
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            bridge.invalidateCache()
-            callJs("window.Launcher && window.Launcher.reload()")
+            bridge.onPackagesChanged()   // rescan en arrière-plan ; le JS n'est notifié que si la liste change
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        window.setBackgroundDrawableResource(R.color.launcher_bg)
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         hideSystemUi()
@@ -68,19 +77,37 @@ class MainActivity : Activity() {
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         WebView.setWebContentsDebuggingEnabled(debuggable)
 
-        bridge = AndroidBridge(this)
-        bridge.warmUp()
+        // Le pont exécute ses notifications dans la WebView courante (même après une recréation).
+        bridge = AndroidBridge(this) { script -> runJs(script) }
+        bridge.warmUp() // scan + icônes en arrière-plan, en parallèle du démarrage de Chromium
 
+        root = FrameLayout(this).apply { setBackgroundColor(BG) }
+        setContentView(root)
+        createWebView()
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        registerReceiver(packageReceiver, filter)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createWebView() {
+        pageReady = false
         webView = WebView(this).apply {
-            setBackgroundColor(Color.parseColor("#06070A"))
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            setBackgroundColor(BG)                              // jamais de flash blanc
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)        // composition GPU
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             // La WebView ne doit jamais gérer le focus elle-même.
             isFocusable = false
             isFocusableInTouchMode = false
-            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 defaultFocusHighlightEnabled = false
             }
@@ -90,15 +117,17 @@ class MainActivity : Activity() {
                 domStorageEnabled = true
                 allowFileAccess = true
                 allowContentAccess = false
+                // Les assets locaux sont lus directement : pas de cache HTTP à consulter.
                 cacheMode = WebSettings.LOAD_NO_CACHE
-                // Mise à l'échelle 1920×1080 → écran faite en JS (app.js › fitStage) :
-                // fiable quelle que soit la densité déclarée par le boîtier (720p, 1080p, 4K).
+                // Mise à l'échelle 1920×1080 → écran faite en JS (app.js › fitStage).
                 useWideViewPort = true
                 loadWithOverviewMode = false
                 setSupportZoom(false)
                 builtInZoomControls = false
                 displayZoomControls = false
                 textZoom = 100
+                @Suppress("DEPRECATION")
+                setRenderPriority(WebSettings.RenderPriority.HIGH)
             }
 
             webChromeClient = WebChromeClient()
@@ -109,22 +138,23 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
                 }
+
+                /** Processus de rendu tué (mémoire) : on recrée la WebView au lieu de planter. */
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    if (view === webView) {
+                        root.removeView(view)
+                        view.destroy()
+                        createWebView()
+                    }
+                    return true
+                }
             }
 
-            addJavascriptInterface(bridge, "AndroidBridge")
+            addJavascriptInterface(bridge, "AndroidBridge")   // avant loadUrl : pont prêt dès la ms 0
         }
-
-        setContentView(webView)
-        webView.loadUrl("file:///android_asset/index.html")
-
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_PACKAGE_ADDED)
-            addAction(Intent.ACTION_PACKAGE_REMOVED)
-            addAction(Intent.ACTION_PACKAGE_CHANGED)
-            addAction(Intent.ACTION_PACKAGE_REPLACED)
-            addDataScheme("package")
-        }
-        registerReceiver(packageReceiver, filter)
+        root.addView(webView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        webView.loadUrl(START_URL)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -177,7 +207,8 @@ class MainActivity : Activity() {
     }
 
     private fun sendKey(name: String, repeat: Boolean) {
-        callJs("window.onRemoteKey && window.onRemoteKey('$name', $repeat)")
+        if (!pageReady) return
+        runJs("window.onRemoteKey && window.onRemoteKey('$name', $repeat)")
     }
 
     @Deprecated("Géré par dispatchKeyEvent ; le launcher ne se ferme jamais.")
@@ -185,15 +216,20 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (Intent.ACTION_MAIN == intent.action) callJs("window.Launcher && window.Launcher.onHome()")
+        if (Intent.ACTION_MAIN == intent.action && pageReady) runJs("window.Launcher && window.Launcher.onHome()")
     }
 
     override fun onResume() {
         super.onResume()
         hideSystemUi()
-        webView.onResume()
-        webView.resumeTimers()
-        callJs("window.Launcher && window.Launcher.onResume()")
+        // Réveil / boot lent : si la page n'a jamais été chargée (ou a été vidée), on la recharge.
+        if (webView.url == null) {
+            webView.loadUrl(START_URL)
+        } else {
+            webView.onResume()
+            webView.resumeTimers()
+            if (pageReady) runJs("window.Launcher && window.Launcher.onResume()")
+        }
     }
 
     override fun onPause() {
@@ -217,9 +253,11 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun callJs(script: String) {
-        if (!pageReady) return
-        webView.post { webView.evaluateJavascript(script, null) }
+    /** Exécute un script dans la WebView courante, toujours depuis le thread UI. */
+    private fun runJs(script: String) {
+        handler.post {
+            if (!isDestroyed) webView.evaluateJavascript(script, null)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -236,5 +274,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val LONG_PRESS_MS = 550L
+        private const val START_URL = "file:///android_asset/index.html"
+        private val BG = Color.parseColor("#050608")
     }
 }

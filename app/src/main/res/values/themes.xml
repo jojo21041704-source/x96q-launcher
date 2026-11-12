@@ -10,5 +10,5 @@
         <item name="android:windowAnimationStyle">@null</item>
         <item name="android:windowShowWallpaper">false</item>
     </style>
-    <color name="launcher_bg">#FF07080C</color>
+    <color name="launcher_bg">#FF050608</color>
 </resources>

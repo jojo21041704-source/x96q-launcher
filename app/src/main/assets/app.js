@@ -88,7 +88,19 @@
   fitStage();
   window.addEventListener('resize', fitStage);
 
-  var bridge = window.AndroidBridge || createMockBridge();
+  // Le pont est injecté avant le chargement de la page ; par sécurité (boot lent), on le réessaie
+  // toutes les 150 ms pendant 3 s. Hors Android (aperçu navigateur), un pont factice est utilisé.
+  var bridge = null;
+  function whenBridgeReady(cb) {
+    if (window.AndroidBridge) { cb(window.AndroidBridge); return; }
+    if (!/Android/i.test(navigator.userAgent)) { cb(createMockBridge()); return; }
+    var waited = 0;
+    var timer = setInterval(function () {
+      waited += 150;
+      if (window.AndroidBridge) { clearInterval(timer); cb(window.AndroidBridge); }
+      else if (waited >= 3000) { clearInterval(timer); }
+    }, 150);
+  }
 
   // ------------------------------------------------------------------ Utilitaires
 
@@ -152,8 +164,9 @@
    * Vérifiée chaque seconde (coût négligeable) ; le DOM n'est modifié qu'au changement de minute.
    * Reste exacte même si le boîtier sort de veille ou si l'heure réseau est corrigée.
    */
-  function tick() {
-    var now = new Date();
+  var clockOffset = 0;   // correction réseau si l'horloge du boîtier est déréglée au démarrage
+  function updateClock() {
+    var now = new Date(Date.now() + clockOffset);
     var t = timeFmt ? timeFmt.format(now) : pad(now.getHours()) + ':' + pad(now.getMinutes());
     if (t !== lastClock) { lastClock = t; els.clock.textContent = t; }
     if (dateFmt) {
@@ -163,10 +176,19 @@
     }
   }
   function startClock() {
-    tick();
+    updateClock();
     clearInterval(clockTimer);
-    clockTimer = setInterval(tick, 1000);
+    clockTimer = setInterval(updateClock, 1000);
   }
+
+  /** Écart (ms) entre l'heure réseau (en-tête HTTP Date) et l'horloge du boîtier. */
+  function applyNetworkTime(offset) {
+    if (typeof offset !== 'number' || !isFinite(offset)) return;
+    // Sous 90 s, l'horloge système est jugée juste (l'en-tête n'est précis qu'à la seconde).
+    clockOffset = Math.abs(offset) > 90000 ? offset : 0;
+    updateClock();
+  }
+  window.onNetworkTime = applyNetworkTime;
 
   // ------------------------------------------------------------------ Météo (Témara / Rabat)
 
@@ -221,6 +243,10 @@
     xhr.onload = function () {
       try {
         var w = JSON.parse(xhr.responseText).current_weather;
+        // Repli JS si l'en-tête Date est exposé (sinon le natif s'en charge : syncNetworkTime).
+        // getAllResponseHeaders ne liste que les en-têtes exposés : aucune erreur s'il est masqué.
+        var m = /(?:^|\n)date:\s*([^\r\n]+)/i.exec(xhr.getAllResponseHeaders() || '');
+        if (m && !isNaN(Date.parse(m[1]))) applyNetworkTime(Date.parse(m[1]) + 500 - Date.now());
         if (w && typeof w.temperature === 'number') {
           writeJson(STORAGE_WEATHER, { t: Date.now(), w: w });
           renderWeather(w);
@@ -236,9 +262,27 @@
 
   // ------------------------------------------------------------------ Données
 
-  function loadApps() {
-    var list = [];
-    try { list = JSON.parse(bridge.getInstalledApps() || '[]'); } catch (e) { list = []; }
+  var STORAGE_APPS = 'cached_apps_v1';
+  var appsSig = '';
+
+  /** Copie locale de la dernière liste reçue du natif : affichage immédiat au démarrage à froid. */
+  function readAppsCache() {
+    var c = readJson(STORAGE_APPS, null);
+    return c && c.apps && c.apps.length ? c : null;
+  }
+  function writeAppsCache(payload) {
+    var raw = JSON.stringify({ sig: payload.sig, apps: payload.apps });
+    try { window.localStorage.setItem(STORAGE_APPS, raw); return; } catch (e) { /* quota */ }
+    // Quota dépassé : on garde au moins noms et couleurs (les icônes reviendront du natif).
+    try {
+      var light = payload.apps.map(function (a) {
+        return { name: a.name, packageName: a.packageName, isTv: a.isTv, category: a.category, accentColor: a.accentColor, icon: '' };
+      });
+      window.localStorage.setItem(STORAGE_APPS, JSON.stringify({ sig: '', apps: light }));
+    } catch (e2) { /* stockage indisponible */ }
+  }
+
+  function setApps(list) {
     state.apps = list;
     state.byPkg = {};
     list.forEach(function (a) { state.byPkg[a.packageName] = a; });
@@ -366,13 +410,28 @@
       state.focusedTile = tile;
       scrollRow(row);
       var app = row.items[row.col];
-      if (app) writeJson(STORAGE_LAST, { pkg: app.packageName, zone: state.zone });
+      if (app) saveLastFocus(app.packageName, state.zone);
     } else {
       state.focusedTile = null;
     }
     updateHero(!repeat);
   }
 
+  // Écriture localStorage différée : aucune E/S synchrone pendant la navigation.
+  var lastFocusTimer = 0;
+  function saveLastFocus(pkg, zone) {
+    clearTimeout(lastFocusTimer);
+    lastFocusTimer = setTimeout(function () { writeJson(STORAGE_LAST, { pkg: pkg, zone: zone }); }, 800);
+  }
+  function restoreLastFocus() {
+    var last = readJson(STORAGE_LAST, null);
+    if (last && (last.zone === 'dock' || last.zone === 'apps')) {
+      var i = indexOfPkg(rows[last.zone], last.pkg);
+      if (i >= 0) { state.zone = last.zone; rows[last.zone].col = i; }
+    }
+  }
+
+  /** Décalage du rail : pure arithmétique (index × pas), aucune mesure DOM. */
   function trackX(row, col) {
     var m = ROW_METRICS[row.key];
     var n = row.items.length;
@@ -427,8 +486,7 @@
     var tile = state.focusedTile;
     if (!tile) return;
     var cls = dir < 0 ? 'is-bump-left' : dir > 0 ? 'is-bump-right' : 'is-bump-down';
-    tile.classList.remove('is-bump-left', 'is-bump-right', 'is-bump-down');
-    void tile.offsetWidth;
+    if (tile.className.indexOf('is-bump') !== -1) return;   // pas de reflow forcé pour relancer
     tile.classList.add(cls);
     setTimeout(function () { tile.classList.remove(cls); }, 180);
   }
@@ -436,6 +494,7 @@
   // ------------------------------------------------------------------ Scène héroïque
 
   var heroKey = null;
+  var heroAnimB = false;
   var haloFront = els.haloA;
   var haloTimer = 0;
   var haloColorKey = null;
@@ -470,17 +529,18 @@
       scheduleHalo(p.base);
     }
 
+    // Deux animations identiques en alternance : relance sans reflow forcé.
     if (changed && animate) {
-      els.heroCopy.classList.remove('is-entering');
-      void els.heroCopy.offsetWidth;
-      els.heroCopy.classList.add('is-entering');
+      heroAnimB = !heroAnimB;
+      els.heroCopy.classList.remove(heroAnimB ? 'is-entering' : 'is-entering-b');
+      els.heroCopy.classList.add(heroAnimB ? 'is-entering-b' : 'is-entering');
     }
   }
 
   /** Le halo n'est repeint qu'une fois la navigation posée (aucune repeinte pendant un défilement rapide). */
   function scheduleHalo(color) {
     clearTimeout(haloTimer);
-    haloTimer = setTimeout(function () { setHalo(color); }, 140);
+    haloTimer = setTimeout(function () { setHalo(color); }, 110);
   }
 
   function setHalo(c) {
@@ -489,14 +549,33 @@
     haloColorKey = k;
     var light = mix(c, WHITE, 0.35);
     var back = haloFront === els.haloA ? els.haloB : els.haloA;
-    // Halo principal sur ~70 % de la largeur + éclat plus clair dans l'angle : deux dégradés, peints une fois.
-    back.style.backgroundImage =
-      'radial-gradient(ellipse 620px 440px at 90% 4%, ' + rgba(light, 0.34) + ' 0%, ' + rgba(light, 0) + ' 100%),' +
-      'radial-gradient(ellipse 1344px 900px at 78% 14%, ' + rgba(c, 0.52) + ' 0%, ' + rgba(c, 0.22) + ' 42%, ' +
-        rgba(c, 0.06) + ' 72%, ' + rgba(c, 0) + ' 100%)';
+    // Le calque caché est redessiné en 320×180 (étiré ×6 par le GPU), puis seule l'opacité bascule.
+    paintHalo(back, c, light);
     back.classList.add('is-visible');
     haloFront.classList.remove('is-visible');
     haloFront = back;
+  }
+
+  // Mêmes ellipses que l'ancien CSS (rayons et positions en px 1920×1080), à l'échelle 1/6.
+  var HALO_K = 320 / STAGE_W;
+  function ellipse(ctx, cx, cy, rx, ry, stops) {
+    ctx.save();
+    ctx.translate(cx * HALO_K, cy * HALO_K);
+    ctx.scale(1, ry / rx);
+    var r = rx * HALO_K;
+    var g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+    for (var i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+    ctx.fillStyle = g;
+    ctx.fillRect(-r, -r, 2 * r, 2 * r);
+    ctx.restore();
+  }
+  function paintHalo(canvas, c, light) {
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ellipse(ctx, 0.78 * STAGE_W, 0.14 * STAGE_H, 1344, 900,
+      [[0, rgba(c, 0.52)], [0.42, rgba(c, 0.22)], [0.72, rgba(c, 0.06)], [1, rgba(c, 0)]]);
+    ellipse(ctx, 0.90 * STAGE_W, 0.04 * STAGE_H, 620, 440,
+      [[0, rgba(light, 0.34)], [1, rgba(light, 0)]]);
   }
 
   // ------------------------------------------------------------------ Actions
@@ -510,6 +589,7 @@
   }
 
   function activate() {
+    if (!bridge) return;                     // pont pas encore prêt (premières ms du boot)
     if (state.zone === 'top') {
       if (!bridge.openSystemSettings()) toast('Paramètres indisponibles');
       return;
@@ -571,13 +651,20 @@
     applyFocus(false);
   }
 
-  function reload() {
+  /** Appelé par le natif (AndroidBridge.deliver) uniquement si la liste a réellement changé. */
+  window.onAppsUpdated = function (payload) {
+    if (!payload || !payload.apps) return;
+    writeAppsCache(payload);                 // avant tout rendu : objets encore « propres »
+    appsSig = payload.sig || '';
+    var first = !state.loaded;
     var app = currentApp();
     var pkg = app && app.packageName;
     var zone = state.zone;
-    loadApps();
+    setApps(payload.apps);
     renderAll();
-    if (zone !== 'top') {
+    if (first) {
+      restoreLastFocus();
+    } else if (zone !== 'top') {
       var i = pkg ? indexOfPkg(rows[zone], pkg) : -1;
       if (i >= 0) rows[zone].col = i;
     }
@@ -585,6 +672,10 @@
     scrollRow(rows.apps);
     heroKey = null;
     applyFocus(false);
+  };
+
+  function reload() {
+    if (bridge && bridge.requestApps) bridge.requestApps('');
   }
 
   // ------------------------------------------------------------------ Entrée télécommande
@@ -630,7 +721,7 @@
     onBack: onBack,
     onHome: onHome,
     onMenu: togglePin,
-    onResume: function () { tick(); fitStage(); loadWeather(); },   // météo : rafraîchie seulement si le cache a plus de 30 min
+    onResume: function () { updateClock(); fitStage(); loadWeather(); },   // météo : rafraîchie seulement si le cache a plus de 30 min
     reload: reload
   };
 
@@ -639,20 +730,32 @@
   function start() {
     startClock();
     loadWeather();
-    renderSkeleton();
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        loadApps();
-        renderAll();
-        var last = readJson(STORAGE_LAST, null);
-        if (last && (last.zone === 'dock' || last.zone === 'apps')) {
-          var i = indexOfPkg(rows[last.zone], last.pkg);
-          if (i >= 0) { state.zone = last.zone; rows[last.zone].col = i; }
-        }
-        scrollRow(rows.dock);
-        scrollRow(rows.apps);
-        applyFocus(false);
-      });
+
+    // 1) Rendu immédiat depuis le cache local : noms, couleurs et icônes de la dernière session.
+    var cache = readAppsCache();
+    if (cache) {
+      appsSig = cache.sig || '';
+      setApps(cache.apps);
+      renderAll();
+      restoreLastFocus();
+      scrollRow(rows.dock);
+      scrollRow(rows.apps);
+      applyFocus(false);
+    } else {
+      renderSkeleton();
+    }
+
+    // 2) Le natif rescanne en arrière-plan et ne répond (onAppsUpdated) que si quelque chose a changé.
+    whenBridgeReady(function (b) {
+      bridge = b;
+      if (b.requestApps) {
+        b.requestApps(cache ? appsSig : '');
+      } else {
+        var list = [];
+        try { list = JSON.parse(b.getInstalledApps() || '[]'); } catch (e) { list = []; }
+        window.onAppsUpdated({ sig: 'sync', apps: list });
+      }
+      if (b.syncNetworkTime) b.syncNetworkTime();
     });
   }
 
