@@ -272,8 +272,11 @@ body { position: relative; }
   transition: transform var(--t-base) var(--ease);
   will-change: transform;
 }
-.row-dock .track { top: 50px; }   /* 32 + 18 */
-.row-apps .track { top: 46px; }   /* 30 + 16 */
+/* Rail avec respiration de 16 px / 12 px : le contour blanc agrandi n'est jamais rogné.
+   Le décalage du rail compense ce padding pour garder les tuiles à la même place. */
+.row-track { padding: 16px 12px; margin-left: -12px; }
+.row-dock .track { top: 34px; }   /* 32 + 18 − 16 */
+.row-apps .track { top: 30px; }   /* 30 + 16 − 16 */
 
 /* ---------- Tuile « Dark Glass » 16:9 -------------------------------------- */
 
@@ -369,22 +372,22 @@ body { position: relative; }
 .row-apps .tile-label { height: 22px; font-size: 17px; line-height: 22px; }
 
 /* Focus tvOS */
-.tile.is-focused .tile-face { opacity: 1; transform: scale3d(1.09, 1.09, 1); }
+.tile.is-focused .tile-face { opacity: 1; transform: scale3d(1.06, 1.06, 1); }
 .tile.is-focused .tile-face:before,
 .tile.is-focused .tile-face:after { opacity: 1; }
 /* Le libellé suit l'agrandissement (≈ moitié de la hauteur ajoutée) : jamais de chevauchement. */
 .tile.is-focused .tile-label { color: #FFFFFF; font-weight: 700; }
-.row-dock .tile.is-focused .tile-label { transform: translate3d(0, 8px, 0); }
-.row-apps .tile.is-focused .tile-label { transform: translate3d(0, 7px, 0); }
+.row-dock .tile.is-focused .tile-label { transform: translate3d(0, 5px, 0); }
+.row-apps .tile.is-focused .tile-label { transform: translate3d(0, 4px, 0); }
 
 .tile.is-pressed .tile-face { transform: scale3d(1.03, 1.03, 1); transition-duration: var(--t-fast); }
 
 .tile.is-bump-left  .tile-face { animation: bump-left  var(--t-base) var(--ease); }
 .tile.is-bump-right .tile-face { animation: bump-right var(--t-base) var(--ease); }
 .tile.is-bump-down  .tile-face { animation: bump-down  var(--t-base) var(--ease); }
-@keyframes bump-left  { 50% { transform: translate3d(-10px, 0, 0) scale3d(1.09, 1.09, 1); } }
-@keyframes bump-right { 50% { transform: translate3d(10px, 0, 0)  scale3d(1.09, 1.09, 1); } }
-@keyframes bump-down  { 50% { transform: translate3d(0, 6px, 0)   scale3d(1.09, 1.09, 1); } }
+@keyframes bump-left  { 50% { transform: translate3d(-10px, 0, 0) scale3d(1.06, 1.06, 1); } }
+@keyframes bump-right { 50% { transform: translate3d(10px, 0, 0)  scale3d(1.06, 1.06, 1); } }
+@keyframes bump-down  { 50% { transform: translate3d(0, 6px, 0)   scale3d(1.06, 1.06, 1); } }
 
 .tile.is-skeleton .tile-face { opacity: 0.4; }
 

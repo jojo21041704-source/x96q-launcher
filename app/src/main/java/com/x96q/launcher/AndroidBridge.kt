@@ -137,18 +137,55 @@ class AndroidBridge(private val activity: Activity) {
             obj.put("packageName", info.activityInfo.packageName)
             obj.put("isTv", isTv)
             obj.put("category", categoryOf(info.activityInfo.applicationInfo))
-            var icon: Bitmap? = null
-            try {
-                icon = info.loadIcon(pm)?.let { renderIcon(it) }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Icon failed for ${info.activityInfo.packageName}", t)
-            }
+            val icon = extractIcon(info)
             obj.put("accentColor", icon?.let { dominantColor(it) } ?: DEFAULT_ACCENT)
             obj.put("icon", icon?.let { toDataUri(it) } ?: "")
             icon?.recycle()
             array.put(obj)
         }
         return array.toString()
+    }
+
+    /**
+     * Icône native complète, en 128×128 :
+     *  1) icône de l'activité lancée (celle qu'affiche le launcher Android),
+     *  2) sinon icône de l'application (PackageManager.getApplicationIcon).
+     * Une icône entièrement transparente est rejetée pour passer à la source suivante.
+     */
+    private fun extractIcon(info: ResolveInfo): Bitmap? {
+        val pkg = info.activityInfo.packageName
+        val sources = listOf<() -> Drawable?>(
+            { info.activityInfo.loadIcon(pm) },
+            { pm.getApplicationIcon(info.activityInfo.applicationInfo) },
+            { pm.getApplicationIcon(pkg) }
+        )
+        for (source in sources) {
+            try {
+                val drawable = source() ?: continue
+                val bitmap = renderIcon(drawable)
+                if (isVisible(bitmap)) return bitmap
+                bitmap.recycle()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Icon source failed for $pkg", t)
+            }
+        }
+        return null
+    }
+
+    /** Vrai si au moins quelques pixels sont opaques (échantillonnage d'une grille 16×16). */
+    private fun isVisible(bitmap: Bitmap): Boolean {
+        val step = bitmap.width / 16
+        var opaque = 0
+        var y = step / 2
+        while (y < bitmap.height) {
+            var x = step / 2
+            while (x < bitmap.width) {
+                if ((bitmap.getPixel(x, y) ushr 24) > 32) opaque++
+                x += step
+            }
+            y += step
+        }
+        return opaque >= 8
     }
 
     private fun query(category: String): List<ResolveInfo> = try {

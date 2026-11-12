@@ -147,15 +147,25 @@
   } catch (e) { /* repli manuel */ }
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  var lastClock = '', lastDate = '';
+  /**
+   * Vérifiée chaque seconde (coût négligeable) ; le DOM n'est modifié qu'au changement de minute.
+   * Reste exacte même si le boîtier sort de veille ou si l'heure réseau est corrigée.
+   */
   function tick() {
-    clearTimeout(clockTimer);
     var now = new Date();
-    els.clock.textContent = timeFmt ? timeFmt.format(now) : pad(now.getHours()) + ':' + pad(now.getMinutes());
+    var t = timeFmt ? timeFmt.format(now) : pad(now.getHours()) + ':' + pad(now.getMinutes());
+    if (t !== lastClock) { lastClock = t; els.clock.textContent = t; }
     if (dateFmt) {
       var d = dateFmt.format(now);
-      els.date.textContent = d.charAt(0).toUpperCase() + d.slice(1);
+      d = d.charAt(0).toUpperCase() + d.slice(1);
+      if (d !== lastDate) { lastDate = d; els.date.textContent = d; }
     }
-    clockTimer = setTimeout(tick, 60000 - (now.getSeconds() * 1000 + now.getMilliseconds()) + 50);
+  }
+  function startClock() {
+    tick();
+    clearInterval(clockTimer);
+    clockTimer = setInterval(tick, 1000);
   }
 
   // ------------------------------------------------------------------ Météo (Témara / Rabat)
@@ -278,17 +288,16 @@
     glow.style.backgroundImage = 'radial-gradient(closest-side, ' + rgba(p.glow, 0.42) + ' 0%, ' + rgba(p.glow, 0.14) + ' 55%, ' + rgba(p.glow, 0) + ' 100%)';
     face.appendChild(glow);
 
-    if (app.icon) {
+    // L'icône native (PNG Base64) est toujours prioritaire ; la lettre n'est qu'un repli.
+    if (app.icon && app.icon.indexOf('data:image') === 0) {
       var img = document.createElement('img');
       img.className = 'tile-icon';
       img.alt = '';
+      img.onerror = function () { img.parentNode && img.parentNode.replaceChild(monogram(app), img); };
       img.src = app.icon;
       face.appendChild(img);
     } else {
-      var mono = document.createElement('span');
-      mono.className = 'tile-monogram';
-      mono.textContent = (app.name || '?').charAt(0).toUpperCase();
-      face.appendChild(mono);
+      face.appendChild(monogram(app));
     }
 
     if (showPin && inDock(app.packageName)) {
@@ -304,6 +313,13 @@
     tile.appendChild(face);
     tile.appendChild(label);
     return tile;
+  }
+
+  function monogram(app) {
+    var mono = document.createElement('span');
+    mono.className = 'tile-monogram';
+    mono.textContent = (app.name || '?').charAt(0).toUpperCase();
+    return mono;
   }
 
   function renderRow(row, items, showPin) {
@@ -614,14 +630,14 @@
     onBack: onBack,
     onHome: onHome,
     onMenu: togglePin,
-    onResume: function () { tick(); fitStage(); loadWeather(); },
+    onResume: function () { tick(); fitStage(); loadWeather(); },   // météo : rafraîchie seulement si le cache a plus de 30 min
     reload: reload
   };
 
   // ------------------------------------------------------------------ Démarrage
 
   function start() {
-    tick();
+    startClock();
     loadWeather();
     renderSkeleton();
     requestAnimationFrame(function () {
