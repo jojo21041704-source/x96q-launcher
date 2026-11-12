@@ -69,6 +69,13 @@ app/src/main/assets/
 app/src/main/res/                  Thème, icône et bannière Leanback (vectoriels)
 ```
 
+## Météo
+
+La barre du haut affiche la température actuelle à Témara / Rabat
+(`api.open-meteo.com`, sans clé API). La réponse est gardée 30 min dans `localStorage` :
+au plus une requête par demi-heure, et la dernière valeur connue reste affichée hors connexion.
+Pour changer de ville, modifiez `latitude` / `longitude` dans `WEATHER_URL` (`app.js`).
+
 ## Pont JavaScript
 
 ```js
@@ -87,7 +94,9 @@ Le natif appelle `window.onRemoteKey(nom, repeat)` pour chaque touche, et `windo
 - Aucun `backdrop-filter` ni `filter: blur()`.
 - Seuls `transform` (`scale3d(1.09, 1.09, 1)`, `translate3d`) et `opacity` sont animés, en 120–180 ms.
 - Le canevas 1920×1080 est mis à l'échelle de l'écran réel (`fitStage`) : rien n'est coupé en 720p, 1080p ou 4K.
-- Bannières TV chargées en tâche de fond, une par frame, après le premier affichage.
+- Tuiles « Dark Glass » homogènes : icône 76 px sur fond sombre et halo coloré pré-peint (aucune bannière blanche étirée).
+- Le halo d'ambiance n'est repeint qu'une fois la navigation posée, puis apparaît en fondu d'opacité.
+- CSS compatible avec les anciennes WebView d'Android 10 : ni `inset`, ni `gap` en flexbox.
 - Ombre et bordure de focus (`3px solid #FFFFFF`) pré-rendues dans des pseudo-éléments : seule leur opacité change.
 - Icônes 128 px (adaptatives rendues calque par calque) et couleur dominante calculées une fois au démarrage, puis mises en cache.
 - La teinte d'ambiance n'est repeinte qu'une fois la navigation arrêtée (140 ms).

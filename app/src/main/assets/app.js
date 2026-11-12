@@ -1,5 +1,5 @@
 /* ==========================================================================
-   X96Q Launcher — navigation spatiale tvOS
+   X96Q Launcher — « tvOS Signature »
    Zones verticales : 'top' (Paramètres) → 'dock' (Favoris) → 'apps' (Toutes)
    Entrée unique : window.onRemoteKey(nom, repeat), appelée par MainActivity.kt
    (et par le clavier dans un navigateur, pour l'aperçu).
@@ -9,44 +9,75 @@
 
   var STAGE_W = 1920;
   var STAGE_H = 1080;
-  var PAD_X = 64;
+  var PAD_X = 68;
 
-  // Doit correspondre à style.css
+  // Doit correspondre à style.css (largeur de tuile + marge droite)
   var ROW_METRICS = {
-    dock: { tileW: 270, gap: 32 },
-    apps: { tileW: 230, gap: 28 }
+    dock: { tileW: 290, gap: 26 },
+    apps: { tileW: 245, gap: 28 }
   };
 
   var DOCK_SIZE_DEFAULT = 5;
   var STORAGE_DOCK = 'x96q.dock.v2';
   var STORAGE_LAST = 'x96q.lastFocus.v2';
+  var STORAGE_WEATHER = 'x96q.weather.v1';
 
-  // Applications proposées en priorité dans le dock au premier démarrage.
+  var WEATHER_URL = 'https://api.open-meteo.com/v1/forecast?latitude=33.92&longitude=-6.91&current_weather=true';
+  var WEATHER_TTL = 30 * 60 * 1000;
+
   var DOCK_PRIORITY = [
-    /nuvio/i,
-    /youtube\.tv|youtube/i,
-    /smarttube|liskovsoft/i,
-    /netflix/i,
-    /stremio/i,
-    /disney/i,
-    /amazonvideo|primevideo|avod/i,
-    /spotify/i,
-    /plex/i,
-    /cloudstream|lagradost/i,
-    /kodi|xbmc/i,
-    /airscreen/i
+    /nuvio/i, /youtube\.tv|youtube/i, /smarttube|liskovsoft/i, /netflix/i, /stremio/i, /disney/i,
+    /amazonvideo|primevideo/i, /spotify/i, /plex/i, /cloudstream|lagradost/i, /kodi|xbmc/i, /airscreen/i
   ];
 
-  // Catégorie affichée dans la scène (badge).
-  var STREAMING = /nuvio|youtube|smarttube|liskovsoft|netflix|stremio|disney|amazonvideo|primevideo|plex|cloudstream|lagradost|kodi|xbmc|molotov|canal|francetv|arte|twitch|vlc|mxtech|hbo|max|paramount|crunchyroll|tivimate|iptv/i;
+  // ------------------------------------------------------------------ Catalogue éditorial
+  // Catégorie (badge) + description d'une ligne. Le premier motif qui correspond l'emporte.
+  var CATALOG = [
+    [/nuvio/i, 'Streaming', 'Films, séries et sources directes en haute définition'],
+    [/smarttube|liskovsoft/i, 'Streaming', 'YouTube sans publicité, pensé pour la télécommande'],
+    [/youtube/i, 'Streaming', 'Vidéos, abonnements et créateurs en 4K'],
+    [/netflix/i, 'Streaming', 'Séries, films et documentaires originaux'],
+    [/stremio/i, 'Streaming', 'Catalogue multimédia et extensions'],
+    [/cloudstream|lagradost/i, 'Streaming', 'Films, séries et animés via vos dépôts d’extensions'],
+    [/disney/i, 'Streaming', 'Disney, Pixar, Marvel, Star Wars et National Geographic'],
+    [/amazonvideo|primevideo|amazon\.avod/i, 'Streaming', 'Films, séries et sport en streaming'],
+    [/tivimate|iptv|smarters|ottnavigator/i, 'Télévision', 'Chaînes en direct et guide des programmes'],
+    [/molotov|canal|francetv|arte|mytf1|m6|bein/i, 'Télévision', 'Chaînes TV en direct et replay'],
+    [/plex/i, 'Divertissement', 'Votre médiathèque personnelle, partout'],
+    [/kodi|xbmc/i, 'Divertissement', 'Centre multimédia local et réseau'],
+    [/twitch/i, 'Divertissement', 'Directs, jeux vidéo et communautés'],
+    [/videolan|vlc/i, 'Lecteur', 'Lecteur vidéo universel, tous formats'],
+    [/mxtech|mxplayer|justplayer/i, 'Lecteur', 'Lecteur vidéo rapide pour fichiers locaux'],
+    [/spotify/i, 'Musique', 'Musique et podcasts en streaming'],
+    [/deezer|soundcloud|tidal|music/i, 'Musique', 'Musique en streaming'],
+    [/airscreen|ionitech|airplay|miracast/i, 'Outils', 'Diffusez depuis votre téléphone : AirPlay, Cast, Miracast'],
+    [/android\.vending|play\.store/i, 'Outils', 'Applications et jeux pour votre téléviseur'],
+    [/chrome|browser|firefox|tvbro/i, 'Outils', 'Navigation web sur grand écran'],
+    [/documentsui|file|explorer|xplore/i, 'Outils', 'Fichiers, clés USB et stockage'],
+    [/downloader|aftvnews/i, 'Outils', 'Téléchargez et installez des fichiers'],
+    [/settings|tvsettings/i, 'Système', 'Réglages du boîtier Android'],
+    [/weather|meteo/i, 'Outils', 'Prévisions météo locales']
+  ];
   var CATEGORY_LABEL = {
-    video: 'Streaming', audio: 'Musique', game: 'Jeu', image: 'Photos', social: 'Social',
+    video: 'Streaming', audio: 'Musique', game: 'Jeux', image: 'Photos', social: 'Social',
     news: 'Actualités', maps: 'Navigation', productivity: 'Outils'
   };
+  var DEFAULT_DESC = 'Application installée sur votre boîtier TV';
+
+  function describe(app) {
+    if (app._meta) return app._meta;
+    var hay = app.packageName + ' ' + app.name;
+    for (var i = 0; i < CATALOG.length; i++) {
+      if (CATALOG[i][0].test(hay)) return (app._meta = { cat: CATALOG[i][1], desc: CATALOG[i][2] });
+    }
+    return (app._meta = {
+      cat: CATEGORY_LABEL[app.category] || (app.isTv ? 'Application TV' : 'Application'),
+      desc: DEFAULT_DESC
+    });
+  }
 
   // ------------------------------------------------------------------ Mise à l'échelle
 
-  /** Ajuste le canevas 1920×1080 à l'écran réel, quelle que soit la densité du boîtier. */
   function fitStage() {
     var w = window.innerWidth || document.documentElement.clientWidth || STAGE_W;
     var h = window.innerHeight || document.documentElement.clientHeight || STAGE_H;
@@ -56,8 +87,6 @@
   }
   fitStage();
   window.addEventListener('resize', fitStage);
-
-  // ------------------------------------------------------------------ Pont natif
 
   var bridge = window.AndroidBridge || createMockBridge();
 
@@ -77,28 +106,17 @@
     var n = parseInt(m[1], 16);
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
   }
-  function mix(c, target, t) {
-    return {
-      r: Math.round(c.r + (target.r - c.r) * t),
-      g: Math.round(c.g + (target.g - c.g) * t),
-      b: Math.round(c.b + (target.b - c.b) * t)
-    };
+  function mix(c, t, k) {
+    return { r: Math.round(c.r + (t.r - c.r) * k), g: Math.round(c.g + (t.g - c.g) * k), b: Math.round(c.b + (t.b - c.b) * k) };
   }
   function rgb(c) { return 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')'; }
   function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
-
-  var BLACK = { r: 6, g: 7, b: 10 };
   var WHITE = { r: 255, g: 255, b: 255 };
 
   function palette(app) {
     if (app._palette) return app._palette;
     var base = hexToRgb(app.accentColor);
-    app._palette = {
-      base: base,
-      dark: mix(base, BLACK, 0.45),
-      light: mix(base, WHITE, 0.55)
-    };
-    return app._palette;
+    return (app._palette = { base: base, light: mix(base, WHITE, 0.55), glow: mix(base, WHITE, 0.25) });
   }
 
   // ------------------------------------------------------------------ État
@@ -106,34 +124,26 @@
   var $ = function (id) { return document.getElementById(id); };
   var els = {
     clock: $('clock'), date: $('date'), settings: $('settings'),
-    heroCopy: $('heroCopy'), heroBadge: $('heroBadge'), heroTitle: $('heroTitle'), heroHint: $('heroHint'),
-    heroPoster: $('heroPoster'), heroBanner: $('heroBanner'), heroIcon: $('heroIcon'), heroGlyph: $('heroGlyph'),
-    ambientA: $('ambientA'), ambientB: $('ambientB'), toast: $('toast'), countApps: $('countApps')
+    weather: $('weather'), weatherIcon: $('weatherIcon'), weatherTemp: $('weatherTemp'), weatherSep: $('weatherSep'),
+    heroCopy: $('heroCopy'), heroBadge: $('heroBadge'), heroTitle: $('heroTitle'),
+    heroDesc: $('heroDesc'), heroHint: $('heroHint'),
+    haloA: $('haloA'), haloB: $('haloB'), toast: $('toast'), countApps: $('countApps')
   };
-  els.heroGlyph.appendChild(els.settings.querySelector('svg').cloneNode(true));
 
   var rows = {
-    dock: { key: 'dock', el: $('rowDock'), track: $('trackDock'), items: [], tiles: [], col: 0 },
-    apps: { key: 'apps', el: $('rowApps'), track: $('trackApps'), items: [], tiles: [], col: 0 }
+    dock: { key: 'dock', track: $('trackDock'), items: [], tiles: [], col: 0 },
+    apps: { key: 'apps', track: $('trackApps'), items: [], tiles: [], col: 0 }
   };
   var ROW_ORDER = ['dock', 'apps'];
 
-  var state = {
-    apps: [],
-    byPkg: {},
-    dock: [],
-    zone: 'dock',          // 'top' | 'dock' | 'apps'
-    focusedTile: null,
-    loaded: false
-  };
-  var banners = {};        // packageName → data URI ('' = aucune)
+  var state = { apps: [], byPkg: {}, dock: [], zone: 'dock', focusedTile: null, loaded: false };
 
   // ------------------------------------------------------------------ Horloge
 
   var timeFmt = null, dateFmt = null, clockTimer = 0;
   try {
     timeFmt = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    dateFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+    dateFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   } catch (e) { /* repli manuel */ }
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -141,8 +151,77 @@
     clearTimeout(clockTimer);
     var now = new Date();
     els.clock.textContent = timeFmt ? timeFmt.format(now) : pad(now.getHours()) + ':' + pad(now.getMinutes());
-    if (dateFmt) els.date.textContent = dateFmt.format(now);
+    if (dateFmt) {
+      var d = dateFmt.format(now);
+      els.date.textContent = d.charAt(0).toUpperCase() + d.slice(1);
+    }
     clockTimer = setTimeout(tick, 60000 - (now.getSeconds() * 1000 + now.getMilliseconds()) + 50);
+  }
+
+  // ------------------------------------------------------------------ Météo (Témara / Rabat)
+
+  var WEATHER_ICONS = {
+    sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>',
+    moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M19.5 14.6A8 8 0 0 1 9.4 4.5a8 8 0 1 0 10.1 10.1z"/></svg>',
+    partly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 3.5v1.4M3.5 8.5h1.4M4.9 4.9l1 1M12.1 4.9l-1 1"/><path d="M5.6 11.2a3.2 3.2 0 1 1 5.9-2.4"/><path d="M8 19.5h9.3a3.7 3.7 0 0 0 .4-7.4 5 5 0 0 0-9.5 1.3A3.1 3.1 0 0 0 8 19.5z"/></svg>',
+    cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M7 18.5h10.5a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.6 1.5A3.3 3.3 0 0 0 7 18.5z"/></svg>',
+    fog: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M7 13.5h10.5a3.6 3.6 0 0 0 .3-7.2 5 5 0 0 0-9.6 1.4A3 3 0 0 0 7 13.5z"/><path d="M4 17h16M6 20.5h12"/></svg>',
+    rain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 14.5h10.5a3.8 3.8 0 0 0 .4-7.6 5.2 5.2 0 0 0-10 1.4A3.1 3.1 0 0 0 7 14.5z"/><path d="M9 17.5l-1 3M13 17.5l-1 3M17 17.5l-1 3"/></svg>',
+    snow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 14.5h10.5a3.8 3.8 0 0 0 .4-7.6 5.2 5.2 0 0 0-10 1.4A3.1 3.1 0 0 0 7 14.5z"/><path d="M8.5 18.5h.01M12 20h.01M15.5 18.5h.01"/></svg>',
+    storm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 14.5h10.5a3.8 3.8 0 0 0 .4-7.6 5.2 5.2 0 0 0-10 1.4A3.1 3.1 0 0 0 7 14.5z"/><path d="M12.5 15.5l-2 3.5h3l-2 3.5"/></svg>'
+  };
+
+  function weatherIconKey(code, isDay) {
+    if (code === 0) return isDay ? 'sun' : 'moon';
+    if (code === 1 || code === 2) return isDay ? 'partly' : 'cloud';
+    if (code === 3) return 'cloud';
+    if (code === 45 || code === 48) return 'fog';
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return 'rain';
+    if ((code >= 71 && code <= 77) || code === 85 || code === 86) return 'snow';
+    if (code >= 95) return 'storm';
+    return 'cloud';
+  }
+
+  function renderWeather(w) {
+    if (!w || typeof w.temperature !== 'number') {
+      els.weather.classList.add('is-hidden');
+      els.weatherSep.classList.add('is-hidden');
+      return;
+    }
+    els.weatherIcon.innerHTML = WEATHER_ICONS[weatherIconKey(w.weathercode, w.is_day !== 0)];
+    els.weatherTemp.textContent = Math.round(w.temperature) + '°';
+    els.weather.classList.remove('is-hidden');
+    els.weatherSep.classList.remove('is-hidden');
+  }
+
+  var weatherTimer = 0;
+  function loadWeather() {
+    clearTimeout(weatherTimer);
+    var cached = readJson(STORAGE_WEATHER, null);
+    var age = cached ? Date.now() - cached.t : Infinity;
+    if (cached) renderWeather(cached.w);                    // affichage immédiat, même périmé
+    else renderWeather(null);
+    if (age < WEATHER_TTL) {                                 // cache frais : aucune requête
+      weatherTimer = setTimeout(loadWeather, WEATHER_TTL - age + 1000);
+      return;
+    }
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', WEATHER_URL, true);
+    xhr.timeout = 8000;
+    xhr.onload = function () {
+      try {
+        var w = JSON.parse(xhr.responseText).current_weather;
+        if (w && typeof w.temperature === 'number') {
+          writeJson(STORAGE_WEATHER, { t: Date.now(), w: w });
+          renderWeather(w);
+          weatherTimer = setTimeout(loadWeather, WEATHER_TTL);
+          return;
+        }
+      } catch (e) { /* réponse invalide */ }
+      weatherTimer = setTimeout(loadWeather, 5 * 60 * 1000);
+    };
+    xhr.onerror = xhr.ontimeout = function () { weatherTimer = setTimeout(loadWeather, 5 * 60 * 1000); };
+    try { xhr.send(); } catch (e) { weatherTimer = setTimeout(loadWeather, 5 * 60 * 1000); }
   }
 
   // ------------------------------------------------------------------ Données
@@ -154,8 +233,7 @@
     state.byPkg = {};
     list.forEach(function (a) { state.byPkg[a.packageName] = a; });
 
-    var stored = readJson(STORAGE_DOCK, null);
-    var dock = (stored || []).filter(function (p) { return !!state.byPkg[p]; });
+    var dock = (readJson(STORAGE_DOCK, null) || []).filter(function (p) { return !!state.byPkg[p]; });
     if (!dock.length) dock = defaultDock(list);           // le dock n'est JAMAIS vide
     state.dock = dock;
     writeJson(STORAGE_DOCK, dock);
@@ -174,12 +252,9 @@
         }
       }
     });
-    // Complète avec les applications TV, puis les autres.
     [true, false].forEach(function (tv) {
       list.forEach(function (a) {
-        if (picked.length < DOCK_SIZE_DEFAULT && !!a.isTv === tv && picked.indexOf(a.packageName) === -1) {
-          picked.push(a.packageName);
-        }
+        if (picked.length < DOCK_SIZE_DEFAULT && !!a.isTv === tv && picked.indexOf(a.packageName) === -1) picked.push(a.packageName);
       });
     });
     return picked;
@@ -187,13 +262,7 @@
 
   function inDock(pkg) { return state.dock.indexOf(pkg) !== -1; }
 
-  function categoryLabel(app) {
-    if (CATEGORY_LABEL[app.category]) return CATEGORY_LABEL[app.category];
-    if (STREAMING.test(app.packageName) || STREAMING.test(app.name)) return 'Streaming';
-    return app.isTv ? 'Application TV' : 'Application';
-  }
-
-  // ------------------------------------------------------------------ Rendu
+  // ------------------------------------------------------------------ Rendu des tuiles
 
   function buildTile(app, showPin) {
     var p = palette(app);
@@ -203,7 +272,11 @@
 
     var face = document.createElement('div');
     face.className = 'tile-face';
-    face.style.backgroundImage = 'linear-gradient(135deg, ' + rgb(p.dark) + ' 0%, #12151E 100%)';
+
+    var glow = document.createElement('div');
+    glow.className = 'tile-glow';
+    glow.style.backgroundImage = 'radial-gradient(closest-side, ' + rgba(p.glow, 0.42) + ' 0%, ' + rgba(p.glow, 0.14) + ' 55%, ' + rgba(p.glow, 0) + ' 100%)';
+    face.appendChild(glow);
 
     if (app.icon) {
       var img = document.createElement('img');
@@ -217,7 +290,6 @@
       mono.textContent = (app.name || '?').charAt(0).toUpperCase();
       face.appendChild(mono);
     }
-    if (banners[app.packageName]) attachBanner(tile, face, banners[app.packageName]);
 
     if (showPin && inDock(app.packageName)) {
       var pin = document.createElement('span');
@@ -232,16 +304,6 @@
     tile.appendChild(face);
     tile.appendChild(label);
     return tile;
-  }
-
-  function attachBanner(tile, face, uri) {
-    if (tile.classList.contains('has-banner')) return;
-    var b = document.createElement('img');
-    b.className = 'tile-banner';
-    b.alt = '';
-    b.src = uri;
-    face.insertBefore(b, face.firstChild);
-    tile.classList.add('has-banner');
   }
 
   function renderRow(row, items, showPin) {
@@ -260,7 +322,7 @@
   }
 
   function renderSkeleton() {
-    ['dock', 'apps'].forEach(function (k) {
+    ROW_ORDER.forEach(function (k) {
       var frag = document.createDocumentFragment();
       for (var i = 0; i < 7; i++) {
         var t = document.createElement('div');
@@ -270,37 +332,6 @@
       }
       rows[k].track.appendChild(frag);
     });
-  }
-
-  /** Charge les bannières TV en tâche de fond, une par frame, dock d'abord. */
-  var bannerQueue = [];
-  function queueBanners() {
-    if (!bridge.getAppBanner) return;
-    var seen = {};
-    bannerQueue = [];
-    rows.dock.items.concat(rows.apps.items).forEach(function (a) {
-      if (a.isTv && !seen[a.packageName] && banners[a.packageName] === undefined) {
-        seen[a.packageName] = true;
-        bannerQueue.push(a.packageName);
-      }
-    });
-    setTimeout(pumpBanners, 300);
-  }
-  function pumpBanners() {
-    var pkg = bannerQueue.shift();
-    if (!pkg) return;
-    var uri = '';
-    try { uri = bridge.getAppBanner(pkg) || ''; } catch (e) { uri = ''; }
-    banners[pkg] = uri;
-    if (uri) {
-      ['dock', 'apps'].forEach(function (k) {
-        rows[k].tiles.forEach(function (t) {
-          if (t.getAttribute('data-pkg') === pkg) attachBanner(t, t.firstChild, uri);
-        });
-      });
-      if (currentApp() && currentApp().packageName === pkg) updatePoster(currentApp(), false);
-    }
-    setTimeout(pumpBanners, 32);
   }
 
   // ------------------------------------------------------------------ Focus & navigation
@@ -326,7 +357,6 @@
     updateHero(!repeat);
   }
 
-  /** Défilement horizontal centré, borné au début et à la fin (translate3d uniquement). */
   function trackX(row, col) {
     var m = ROW_METRICS[row.key];
     var n = row.items.length;
@@ -338,11 +368,8 @@
     var minX = Math.min(0, visible - trackW);
     return Math.round(Math.max(minX, Math.min(0, x)));
   }
-  function scrollRow(row) {
-    row.track.style.transform = 'translate3d(' + trackX(row, row.col) + 'px,0,0)';
-  }
+  function scrollRow(row) { row.track.style.transform = 'translate3d(' + trackX(row, row.col) + 'px,0,0)'; }
 
-  /** Colonne de la rangée cible la plus proche horizontalement de la tuile actuelle (comme tvOS). */
   function nearestCol(fromRow, toRow) {
     if (!toRow.items.length) return 0;
     var fm = ROW_METRICS[fromRow.key], tm = ROW_METRICS[toRow.key];
@@ -373,8 +400,7 @@
     var idx = ROW_ORDER.indexOf(state.zone) + delta;
     if (idx < 0) { state.zone = 'top'; applyFocus(repeat); return; }
     if (idx >= ROW_ORDER.length) { if (!repeat) bump(0); return; }
-    var from = rows[state.zone];
-    var to = rows[ROW_ORDER[idx]];
+    var from = rows[state.zone], to = rows[ROW_ORDER[idx]];
     if (!to.items.length) return;
     to.col = nearestCol(from, to);
     state.zone = to.key;
@@ -394,9 +420,9 @@
   // ------------------------------------------------------------------ Scène héroïque
 
   var heroKey = null;
-  var ambientFront = els.ambientA;
-  var ambientTimer = 0;
-  var posterTimer = 0;
+  var haloFront = els.haloA;
+  var haloTimer = 0;
+  var haloColorKey = null;
 
   function updateHero(animate) {
     if (!state.loaded) return;
@@ -406,27 +432,26 @@
     heroKey = key;
 
     if (!app) {
-      els.heroCopy.style.setProperty('--accent-light', 'rgba(255,255,255,0.7)');
+      els.heroCopy.style.setProperty('--accent-tint', 'rgba(255,255,255,0.10)');
+      els.heroCopy.style.setProperty('--accent-light', 'rgba(255,255,255,0.85)');
       els.heroBadge.textContent = 'Système';
       els.heroTitle.textContent = 'Paramètres';
-      els.heroHint.textContent = 'Réseau, affichage, son et applications';
-      setPosterGlyph();
-      clearTimeout(ambientTimer);
-      setAmbient(null);
+      els.heroDesc.textContent = 'Réseau, affichage, son et applications du boîtier';
+      els.heroHint.classList.add('is-hidden');
+      scheduleHalo({ r: 120, g: 132, b: 160 });
     } else {
       var p = palette(app);
+      var meta = describe(app);
+      els.heroCopy.style.setProperty('--accent-tint', rgba(p.base, 0.18));
       els.heroCopy.style.setProperty('--accent-light', rgb(p.light));
-      els.heroBadge.textContent = categoryLabel(app);
+      els.heroBadge.textContent = meta.cat;
       els.heroTitle.textContent = app.name;          // jamais le packageName
+      els.heroDesc.textContent = meta.desc;
       els.heroHint.textContent = inDock(app.packageName)
         ? 'Appui long OK • Retirer des favoris'
         : 'Appui long OK • Épingler aux favoris';
-
-      clearTimeout(posterTimer);
-      // Pendant un défilement rapide, l'affiche attend que la navigation se pose.
-      posterTimer = setTimeout(function () { updatePoster(app, true); }, animate ? 0 : 120);
-      clearTimeout(ambientTimer);
-      ambientTimer = setTimeout(function () { setAmbient(app); }, 120);
+      els.heroHint.classList.remove('is-hidden');
+      scheduleHalo(p.base);
     }
 
     if (changed && animate) {
@@ -436,39 +461,26 @@
     }
   }
 
-  function updatePoster(app, animate) {
-    if (currentApp() !== app) return;
-    var p = palette(app);
-    var poster = els.heroPoster;
-    poster.className = 'hero-poster';
-    poster.style.backgroundImage = 'linear-gradient(135deg, ' + rgb(p.dark) + ' 0%, #12151E 100%)';
-    var uri = banners[app.packageName];
-    if (uri) {
-      if (els.heroBanner.getAttribute('src') !== uri) els.heroBanner.src = uri;
-      poster.classList.add('has-banner');
-    } else if (app.icon) {
-      if (els.heroIcon.getAttribute('src') !== app.icon) els.heroIcon.src = app.icon;
-      poster.classList.add('has-icon');
-    }
-    if (animate) { void poster.offsetWidth; poster.classList.add('is-entering'); }
+  /** Le halo n'est repeint qu'une fois la navigation posée (aucune repeinte pendant un défilement rapide). */
+  function scheduleHalo(color) {
+    clearTimeout(haloTimer);
+    haloTimer = setTimeout(function () { setHalo(color); }, 140);
   }
 
-  function setPosterGlyph() {
-    clearTimeout(posterTimer);
-    els.heroPoster.className = 'hero-poster has-glyph';
-    els.heroPoster.style.backgroundImage = 'linear-gradient(135deg, #252A36 0%, #12151E 100%)';
-  }
-
-  function setAmbient(app) {
-    var back = ambientFront === els.ambientA ? els.ambientB : els.ambientA;
-    if (!app) { ambientFront.classList.remove('is-visible'); return; }
-    var c = palette(app).base;
-    // Fondu complet avant la moitié de l'écran et avant le dock : le bas reste noir profond.
+  function setHalo(c) {
+    var k = c.r + ',' + c.g + ',' + c.b;
+    if (k === haloColorKey) return;
+    haloColorKey = k;
+    var light = mix(c, WHITE, 0.35);
+    var back = haloFront === els.haloA ? els.haloB : els.haloA;
+    // Halo principal sur ~70 % de la largeur + éclat plus clair dans l'angle : deux dégradés, peints une fois.
     back.style.backgroundImage =
-      'radial-gradient(ellipse 960px 620px at 100% 0%, ' + rgba(c, 1) + ' 0%, ' + rgba(c, 0.35) + ' 45%, ' + rgba(c, 0) + ' 100%)';
+      'radial-gradient(ellipse 620px 440px at 90% 4%, ' + rgba(light, 0.34) + ' 0%, ' + rgba(light, 0) + ' 100%),' +
+      'radial-gradient(ellipse 1344px 900px at 78% 14%, ' + rgba(c, 0.52) + ' 0%, ' + rgba(c, 0.22) + ' 42%, ' +
+        rgba(c, 0.06) + ' 72%, ' + rgba(c, 0) + ' 100%)';
     back.classList.add('is-visible');
-    ambientFront.classList.remove('is-visible');
-    ambientFront = back;
+    haloFront.classList.remove('is-visible');
+    haloFront = back;
   }
 
   // ------------------------------------------------------------------ Actions
@@ -502,7 +514,6 @@
     var app = currentApp();
     if (!app) return;
     var pkg = app.packageName;
-
     if (inDock(pkg)) {
       if (state.dock.length <= 1) { toast('Le dock garde au moins une application'); return; }
       state.dock = state.dock.filter(function (p) { return p !== pkg; });
@@ -519,6 +530,7 @@
       var i = indexOfPkg(rows.apps, pkg);
       if (i >= 0) rows.apps.col = i;
     }
+    scrollRow(rows.dock);
     heroKey = null;
     applyFocus(false);
   }
@@ -528,7 +540,6 @@
     return -1;
   }
 
-  /** RETOUR : jamais de sortie. Apps → dock ; dock → première tuile ; Paramètres → dock. */
   function onBack() {
     if (state.zone === 'top') { state.zone = 'dock'; applyFocus(false); return; }
     if (state.zone === 'apps') { rows.dock.col = nearestCol(rows.apps, rows.dock); state.zone = 'dock'; applyFocus(false); return; }
@@ -551,15 +562,13 @@
     loadApps();
     renderAll();
     if (zone !== 'top') {
-      var row = rows[zone];
-      var i = pkg ? indexOfPkg(row, pkg) : -1;
-      if (i >= 0) row.col = i;
+      var i = pkg ? indexOfPkg(rows[zone], pkg) : -1;
+      if (i >= 0) rows[zone].col = i;
     }
     scrollRow(rows.dock);
     scrollRow(rows.apps);
     heroKey = null;
     applyFocus(false);
-    queueBanners();
   }
 
   // ------------------------------------------------------------------ Entrée télécommande
@@ -579,12 +588,10 @@
     }
   };
 
-  // Clavier : utilisé seulement hors Android (aperçu navigateur). Sur le boîtier, MainActivity
-  // intercepte toutes les touches avant la WebView.
+  // Clavier : aperçu navigateur uniquement (sur le boîtier, MainActivity intercepte tout).
   var kbEnterTimer = 0, kbEnterDown = false, kbEnterLong = false;
   document.addEventListener('keydown', function (e) {
-    var k = e.key;
-    if (k === 'Enter' || e.keyCode === 13) {
+    if (e.key === 'Enter' || e.keyCode === 13) {
       e.preventDefault();
       if (kbEnterDown) return;
       kbEnterDown = true; kbEnterLong = false;
@@ -593,7 +600,7 @@
     }
     var map = { ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
       Escape: 'Back', Backspace: 'Back', GoBack: 'Back', ContextMenu: 'Menu', m: 'Menu' };
-    if (map[k]) { e.preventDefault(); window.onRemoteKey(map[k], e.repeat); }
+    if (map[e.key]) { e.preventDefault(); window.onRemoteKey(map[e.key], e.repeat); }
   }, true);
   document.addEventListener('keyup', function (e) {
     if (!(e.key === 'Enter' || e.keyCode === 13)) return;
@@ -603,13 +610,11 @@
     kbEnterDown = false;
   }, true);
 
-  // ------------------------------------------------------------------ API native
-
   window.Launcher = {
     onBack: onBack,
     onHome: onHome,
     onMenu: togglePin,
-    onResume: function () { tick(); fitStage(); },
+    onResume: function () { tick(); fitStage(); loadWeather(); },
     reload: reload
   };
 
@@ -617,6 +622,7 @@
 
   function start() {
     tick();
+    loadWeather();
     renderSkeleton();
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
@@ -630,7 +636,6 @@
         scrollRow(rows.dock);
         scrollRow(rows.apps);
         applyFocus(false);
-        queueBanners();
       });
     });
   }
@@ -641,46 +646,33 @@
   // ------------------------------------------------------------------ Aperçu navigateur
 
   function createMockBridge() {
+    // [nom, package, accent, TV, icône sur fond blanc ?]
     var demo = [
-      ['NuvioTV', 'com.nuvio.tv', '#7B5CFF', 1], ['YouTube', 'com.google.android.youtube.tv', '#FF0000', 1],
-      ['Netflix', 'com.netflix.ninja', '#E50914', 1], ['AirScreen', 'com.ionitech.airscreen', '#2FB8A6', 1],
-      ['Stremio', 'com.stremio.one', '#8A5AF0', 1], ['Spotify', 'com.spotify.tv.android', '#1DB954', 1],
-      ['Disney+', 'com.disney.disneyplus', '#113CCF', 1], ['Prime Video', 'com.amazon.amazonvideo.livingroom', '#1A98FF', 1],
-      ['CloudStream', 'com.lagradost.cloudstream3', '#3D7BF7', 0], ['Kodi', 'org.xbmc.kodi', '#17B2E7', 1],
-      ['VLC', 'org.videolan.vlc', '#FF8800', 1], ['Plex', 'com.plexapp.android', '#E5A00D', 1],
-      ['Chrome', 'com.android.chrome', '#4285F4', 0], ['Fichiers', 'com.android.documentsui', '#4A5468', 0],
-      ['Google Play Store', 'com.android.vending', '#01875F', 1], ['Twitch', 'tv.twitch.android.app', '#9146FF', 1],
-      ['SmartTube', 'com.liskovsoft.smarttubetv.beta', '#E62117', 1], ['Météo', 'com.example.weather', '#3A8DDE', 0]
+      ['NuvioTV', 'com.nuvio.tv', '#7B5CFF', 1, 0], ['YouTube', 'com.google.android.youtube.tv', '#FF0000', 1, 1],
+      ['Netflix', 'com.netflix.ninja', '#E50914', 1, 0], ['AirScreen', 'com.ionitech.airscreen', '#2FB8A6', 1, 1],
+      ['Stremio', 'com.stremio.one', '#8A5AF0', 1, 0], ['Spotify', 'com.spotify.tv.android', '#1DB954', 1, 0],
+      ['Disney+', 'com.disney.disneyplus', '#113CCF', 1, 0], ['Prime Video', 'com.amazon.amazonvideo.livingroom', '#1A98FF', 1, 0],
+      ['CloudStream', 'com.lagradost.cloudstream3', '#3D7BF7', 0, 0], ['Kodi', 'org.xbmc.kodi', '#17B2E7', 1, 1],
+      ['VLC', 'org.videolan.vlc', '#FF8800', 1, 0], ['Plex', 'com.plexapp.android', '#E5A00D', 1, 0],
+      ['Chrome', 'com.android.chrome', '#4285F4', 0, 1], ['Fichiers', 'com.android.documentsui', '#4A5468', 0, 0],
+      ['Google Play Store', 'com.android.vending', '#01875F', 1, 1], ['Twitch', 'tv.twitch.android.app', '#9146FF', 1, 0],
+      ['SmartTube', 'com.liskovsoft.smarttubetv.beta', '#E62117', 1, 0], ['Downloader', 'com.esaba.downloader', '#F2A300', 1, 0]
     ];
-    function iconFor(name, color) {
+    function iconFor(name, color, white) {
       var c = document.createElement('canvas'); c.width = c.height = 128;
       var x = c.getContext('2d');
-      x.fillStyle = color; x.beginPath();
-      if (x.roundRect) x.roundRect(0, 0, 128, 128, 30); else x.rect(0, 0, 128, 128);
-      x.fill();
-      x.fillStyle = '#fff'; x.font = '800 64px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillStyle = white ? '#FFFFFF' : color; x.fillRect(0, 0, 128, 128);
+      x.fillStyle = white ? color : '#FFFFFF';
+      x.font = '800 66px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
       x.fillText(name.charAt(0), 64, 68);
       return c.toDataURL('image/png');
     }
-    function bannerFor(name, color) {
-      var c = document.createElement('canvas'); c.width = 480; c.height = 270;
-      var x = c.getContext('2d');
-      x.fillStyle = '#0B0C10'; x.fillRect(0, 0, 480, 270);
-      x.fillStyle = color; x.font = '800 64px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-      x.fillText(name, 240, 140);
-      return c.toDataURL('image/png');
-    }
     var apps = demo.map(function (d) {
-      return { name: d[0], packageName: d[1], accentColor: d[2], isTv: !!d[3], category: '', icon: iconFor(d[0], d[2]) };
+      return { name: d[0], packageName: d[1], accentColor: d[2], isTv: !!d[3], category: '', icon: iconFor(d[0], d[2], d[4]) };
     }).sort(function (a, b) { return a.name.localeCompare(b.name); });
-    var withBanner = { 'com.google.android.youtube.tv': 1, 'com.netflix.ninja': 1, 'com.disney.disneyplus': 1, 'com.spotify.tv.android': 1 };
     return {
       getInstalledApps: function () { return JSON.stringify(apps); },
-      getAppBanner: function (pkg) {
-        if (!withBanner[pkg]) return '';
-        var a = apps.filter(function (x) { return x.packageName === pkg; })[0];
-        return bannerFor(a.name, a.accentColor);
-      },
+      getAppBanner: function () { return ''; },
       launchApp: function (pkg) { console.log('[aperçu] launchApp', pkg); return true; },
       openSystemSettings: function () { console.log('[aperçu] openSystemSettings'); return true; }
     };

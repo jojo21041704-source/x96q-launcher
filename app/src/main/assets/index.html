@@ -8,14 +8,21 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="ambient" aria-hidden="true">
-    <div class="ambient-layer" id="ambientA"></div>
-    <div class="ambient-layer" id="ambientB"></div>
+  <!-- Scène atmosphérique : deux calques de halo en fondu croisé + voile fixe vers le noir. -->
+  <div class="atmosphere" aria-hidden="true">
+    <div class="halo" id="haloA"></div>
+    <div class="halo" id="haloB"></div>
+    <div class="veil"></div>
   </div>
 
   <header class="topbar">
-    <p class="eyebrow"><span>Accueil</span><span class="eyebrow-dot">•</span><span id="date"></span></p>
-    <div class="topbar-right">
+    <p class="crumb"><span class="crumb-home">Accueil</span><span class="crumb-dot"></span><span class="crumb-date" id="date"></span></p>
+    <div class="status">
+      <div class="weather is-hidden" id="weather">
+        <span class="weather-icon" id="weatherIcon"></span>
+        <span class="weather-temp" id="weatherTemp"></span>
+      </div>
+      <span class="status-sep" id="weatherSep"></span>
       <time class="clock" id="clock">--:--</time>
       <div class="settings" id="settings" role="button" aria-label="Paramètres">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -28,20 +35,16 @@
 
   <section class="hero" id="hero">
     <div class="hero-copy" id="heroCopy">
-      <p class="hero-badge" id="heroBadge">&nbsp;</p>
+      <span class="hero-badge" id="heroBadge">Accueil</span>
       <h1 class="hero-title" id="heroTitle">Chargement…</h1>
+      <p class="hero-desc" id="heroDesc">Lecture des applications installées</p>
       <div class="hero-actions">
-        <span class="btn-open" id="heroOpen">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
-          Ouvrir
+        <span class="btn-open">
+          <svg class="btn-open-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.6v10.8c0 .5.5.8.9.5l8.4-5.4a.6.6 0 0 0 0-1L5.4 2.1c-.4-.3-.9 0-.9.5z" fill="#050608"/></svg>
+          <span class="btn-open-label">Ouvrir</span>
         </span>
-        <span class="hero-hint" id="heroHint">Appui long OK • Épingler aux favoris</span>
+        <span class="hero-hint" id="heroHint">Appui long OK • Épingler / Retirer</span>
       </div>
-    </div>
-    <div class="hero-poster" id="heroPoster">
-      <img class="hero-poster-banner" id="heroBanner" alt="">
-      <img class="hero-poster-icon" id="heroIcon" alt="" width="128" height="128">
-      <div class="hero-poster-glyph" id="heroGlyph" aria-hidden="true"></div>
     </div>
   </section>
 
@@ -51,7 +54,7 @@
   </section>
 
   <section class="row row-apps" id="rowApps">
-    <h2 class="row-title">Toutes les applications <span class="row-count" id="countApps"></span></h2>
+    <h2 class="row-title">Toutes les applications<span class="row-count" id="countApps"></span></h2>
     <div class="track" id="trackApps"></div>
   </section>
 
