@@ -37,15 +37,19 @@ Appuyez ensuite sur **HOME** : Android propose de choisir le launcher. Sélectio
 
 ## Télécommande
 
+Toutes les touches sont interceptées nativement (`MainActivity.dispatchKeyEvent`) puis relayées à
+`window.onRemoteKey(nom, repeat)` : la WebView ne reçoit jamais les flèches et ne peut pas bloquer le focus.
+
 | Touche | Action |
 | --- | --- |
-| Flèches | Navigation spatiale entre cartes, rangées et bouton Paramètres |
-| OK | Ouvrir l'application |
-| OK maintenu (0,5 s) ou MENU | Épingler / retirer des favoris |
-| RETOUR | Revient au début de la rangée, puis à la première rangée. Ne ferme jamais le launcher. |
-| HOME | Recentre sur le premier favori |
+| Flèches | Paramètres ↕ Favoris ↕ Toutes les applications ; Gauche/Droite avec défilement centré |
+| OK | Ouvrir l'application (ou les Paramètres) |
+| OK maintenu (0,55 s) ou MENU | Épingler / retirer des favoris |
+| RETOUR | Toutes les apps → Favoris → première tuile. Ne ferme jamais le launcher. |
+| HOME | Revient à la première tuile des Favoris |
 
-Les favoris sont enregistrés dans le `localStorage` de la WebView (`x96q.favorites.v1`).
+Le dock n'est jamais vide : au premier démarrage il est rempli avec 5 applications
+(Nuvio, YouTube, SmartTube, Netflix, Stremio… si présentes), sauvegardées dans `localStorage` (`x96q.dock.v2`).
 
 ## Arborescence
 
@@ -61,7 +65,7 @@ app/src/main/java/com/x96q/launcher/
   AndroidBridge.kt                 getInstalledApps() / launchApp() / openSystemSettings()
 app/src/main/assets/
   index.html, style.css, app.js    Interface 10-foot (canevas 1920×1080)
-  fonts/                           Instrument Serif + Inter (woff2, licence SIL OFL), embarquées hors ligne
+  fonts/                           Inter 400–800 (woff2, licence SIL OFL), embarquée hors ligne
 app/src/main/res/                  Thème, icône et bannière Leanback (vectoriels)
 ```
 
@@ -69,27 +73,30 @@ app/src/main/res/                  Thème, icône et bannière Leanback (vectori
 
 ```js
 JSON.parse(AndroidBridge.getInstalledApps())
-// [{ name, packageName, isTv, icon: "data:image/png;base64,…" }]   icônes PNG 96×96
+// [{ name, packageName, isTv, category, accentColor: "#RRGGBB", icon: "data:image/png;base64,…" }]  icônes 128×128
+AndroidBridge.getAppBanner("com.netflix.ninja")            // bannière Android TV 480×270 ou ""
 AndroidBridge.launchApp("com.google.android.youtube.tv")   // true / false
 AndroidBridge.openSystemSettings()
 ```
 
-Le natif appelle en retour `window.Launcher.onBack()`, `onMenu()`, `onHome()`, `onResume()` et `reload()`
+Le natif appelle `window.onRemoteKey(nom, repeat)` pour chaque touche, et `window.Launcher.onHome()`, `onResume()`, `reload()`
 (ce dernier après chaque installation ou désinstallation d'application).
 
 ## Performance (Mali-G31)
 
 - Aucun `backdrop-filter` ni `filter: blur()`.
-- Seuls `transform` (`scale3d(1.07, 1.07, 1)`, `translate3d`) et `opacity` sont animés, en 120–160 ms.
+- Seuls `transform` (`scale3d(1.09, 1.09, 1)`, `translate3d`) et `opacity` sont animés, en 120–180 ms.
+- Le canevas 1920×1080 est mis à l'échelle de l'écran réel (`fitStage`) : rien n'est coupé en 720p, 1080p ou 4K.
+- Bannières TV chargées en tâche de fond, une par frame, après le premier affichage.
 - Ombre et bordure de focus (`3px solid #FFFFFF`) pré-rendues dans des pseudo-éléments : seule leur opacité change.
-- Icônes calculées une fois en arrière-plan au démarrage, puis mises en cache côté natif.
+- Icônes 128 px (adaptatives rendues calque par calque) et couleur dominante calculées une fois au démarrage, puis mises en cache.
 - La teinte d'ambiance n'est repeinte qu'une fois la navigation arrêtée (140 ms).
 
 ## Aperçu dans un navigateur
 
 Ouvrez `app/src/main/assets/index.html` dans Chrome : un pont factice fournit des applications de démonstration.
-La touche `P` simule MENU, `Échap` simule RETOUR.
+La touche `M` simule MENU, `Échap` simule RETOUR, `Entrée` maintenue épingle.
 
 ## Licences des polices
 
-Instrument Serif et Inter sont distribuées sous SIL Open Font License 1.1.
+Inter est distribuée sous SIL Open Font License 1.1.

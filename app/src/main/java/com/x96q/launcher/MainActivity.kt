@@ -10,6 +10,8 @@ import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -20,18 +22,34 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 
 /**
- * Coque native minimale : une WebView plein écran qui affiche l'UI 10-foot
- * (assets/index.html) et lui expose le pont [AndroidBridge].
+ * Coque native : WebView plein écran + interception TOTALE de la télécommande.
  *
- * La touche RETOUR n'est jamais transmise au système : le launcher ne se ferme pas.
+ * Aucune touche directionnelle n'atteint la WebView : elle ne peut donc ni voler,
+ * ni bloquer le focus. Chaque touche est relayée à `window.onRemoteKey(nom, repeat)`.
+ *
+ *   Haut/Bas/Gauche/Droite → "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"
+ *   OK / Entrée            → "Enter"      (au relâchement, si pas d'appui long)
+ *   OK maintenu 550 ms     → "LongEnter"  (épingler / retirer du dock)
+ *   Retour                 → "Back"       (le launcher ne se ferme jamais)
+ *   Menu                   → "Menu"
  */
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
     private lateinit var bridge: AndroidBridge
+    private val handler = Handler(Looper.getMainLooper())
     private var pageReady = false
 
-    /** Rafraîchit la liste quand une app est installée, mise à jour ou désinstallée. */
+    // Gestion de l'appui long sur OK
+    private var okDown = false
+    private var okLongFired = false
+    private val okLongRunnable = Runnable {
+        if (okDown) {
+            okLongFired = true
+            sendKey("LongEnter", false)
+        }
+    }
+
     private val packageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             bridge.invalidateCache()
@@ -51,30 +69,32 @@ class MainActivity : Activity() {
         WebView.setWebContentsDebuggingEnabled(debuggable)
 
         bridge = AndroidBridge(this)
-        bridge.warmUp() // pré-calcule les icônes en arrière-plan pendant le chargement de la page
+        bridge.warmUp()
 
         webView = WebView(this).apply {
-            setBackgroundColor(Color.parseColor("#07080C"))
+            setBackgroundColor(Color.parseColor("#06070A"))
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            isFocusable = true
-            isFocusableInTouchMode = true
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
+            // La WebView ne doit jamais gérer le focus elle-même.
+            isFocusable = false
+            isFocusableInTouchMode = false
+            descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 defaultFocusHighlightEnabled = false
             }
 
             settings.apply {
                 javaScriptEnabled = true
-                domStorageEnabled = true          // localStorage (favoris)
-                allowFileAccess = true            // file:///android_asset/
+                domStorageEnabled = true
+                allowFileAccess = true
                 allowContentAccess = false
-                mediaPlaybackRequiresUserGesture = true
                 cacheMode = WebSettings.LOAD_NO_CACHE
-                // L'UI est dessinée sur un canevas de 1920 px de large puis mise à l'échelle de l'écran.
+                // Mise à l'échelle 1920×1080 → écran faite en JS (app.js › fitStage) :
+                // fiable quelle que soit la densité déclarée par le boîtier (720p, 1080p, 4K).
                 useWideViewPort = true
-                loadWithOverviewMode = true
+                loadWithOverviewMode = false
                 setSupportZoom(false)
                 builtInZoomControls = false
                 displayZoomControls = false
@@ -83,14 +103,11 @@ class MainActivity : Activity() {
 
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    // Aucune navigation hors des assets locaux.
-                    return !request.url.toString().startsWith("file:///android_asset/")
-                }
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                    !request.url.toString().startsWith("file:///android_asset/")
 
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
-                    view.requestFocus(View.FOCUS_DOWN)
                 }
             }
 
@@ -110,41 +127,65 @@ class MainActivity : Activity() {
         registerReceiver(packageReceiver, filter)
     }
 
-    /**
-     * Intercepte la télécommande avant la WebView :
-     *  - RETOUR  → window.Launcher.onBack()   (jamais de fermeture du launcher)
-     *  - MENU    → window.Launcher.onMenu()   (épingler / retirer des favoris)
-     * Les flèches et OK sont transmis tels quels à la WebView (événements clavier JS).
-     */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
-                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
-                    callJs("window.Launcher && window.Launcher.onBack()")
-                }
-                return true
+        val name = when (event.keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
+            KeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
+            KeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
+            KeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_BUTTON_A -> "Enter"
+            KeyEvent.KEYCODE_BACK,
+            KeyEvent.KEYCODE_ESCAPE,
+            KeyEvent.KEYCODE_BUTTON_B -> "Back"
+            KeyEvent.KEYCODE_MENU -> "Menu"
+            else -> null
+        } ?: return super.dispatchKeyEvent(event) // volume, HOME, etc. : comportement système
+
+        if (name == "Enter") {
+            handleOk(event)
+            return true
+        }
+
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            // Retour et Menu : une seule action par appui, pas de répétition.
+            val repeat = event.repeatCount > 0
+            if (repeat && (name == "Back" || name == "Menu")) return true
+            sendKey(name, repeat)
+        }
+        return true
+    }
+
+    /** OK court → "Enter" au relâchement ; OK maintenu → "LongEnter" une seule fois. */
+    private fun handleOk(event: KeyEvent) {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0) {
+                okDown = true
+                okLongFired = false
+                handler.removeCallbacks(okLongRunnable)
+                handler.postDelayed(okLongRunnable, LONG_PRESS_MS)
             }
-            KeyEvent.KEYCODE_MENU -> {
-                if (event.action == KeyEvent.ACTION_UP) {
-                    callJs("window.Launcher && window.Launcher.onMenu()")
-                }
-                return true
+            KeyEvent.ACTION_UP -> {
+                handler.removeCallbacks(okLongRunnable)
+                if (okDown && !okLongFired && !event.isCanceled) sendKey("Enter", false)
+                okDown = false
+                okLongFired = false
             }
         }
-        return super.dispatchKeyEvent(event)
     }
 
-    @Deprecated("Remplacé par dispatchKeyEvent ; conservé pour ne jamais quitter le launcher.")
-    override fun onBackPressed() {
-        // Volontairement vide.
+    private fun sendKey(name: String, repeat: Boolean) {
+        callJs("window.onRemoteKey && window.onRemoteKey('$name', $repeat)")
     }
 
-    /** HOME pressé alors que le launcher est déjà au premier plan. */
+    @Deprecated("Géré par dispatchKeyEvent ; le launcher ne se ferme jamais.")
+    override fun onBackPressed() { /* volontairement vide */ }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (Intent.ACTION_MAIN == intent.action) {
-            callJs("window.Launcher && window.Launcher.onHome()")
-        }
+        if (Intent.ACTION_MAIN == intent.action) callJs("window.Launcher && window.Launcher.onHome()")
     }
 
     override fun onResume() {
@@ -156,6 +197,8 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        handler.removeCallbacks(okLongRunnable)
+        okDown = false
         webView.onPause()
         super.onPause()
     }
@@ -166,10 +209,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(packageReceiver)
-        } catch (_: IllegalArgumentException) {
-        }
+        handler.removeCallbacksAndMessages(null)
+        try { unregisterReceiver(packageReceiver) } catch (_: IllegalArgumentException) { }
         bridge.shutdown()
         webView.removeJavascriptInterface("AndroidBridge")
         webView.destroy()
@@ -191,5 +232,9 @@ class MainActivity : Activity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             )
+    }
+
+    companion object {
+        private const val LONG_PRESS_MS = 550L
     }
 }

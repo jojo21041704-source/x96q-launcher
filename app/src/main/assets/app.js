@@ -1,108 +1,147 @@
 /* ==========================================================================
-   X96Q Launcher — logique de l'interface 10-foot
-   - Navigation spatiale à la télécommande (flèches, OK, Retour)
-   - Favoris épinglables (localStorage)
-   - Défilement horizontal centré, uniquement via transform
+   X96Q Launcher — navigation spatiale tvOS
+   Zones verticales : 'top' (Paramètres) → 'dock' (Favoris) → 'apps' (Toutes)
+   Entrée unique : window.onRemoteKey(nom, repeat), appelée par MainActivity.kt
+   (et par le clavier dans un navigateur, pour l'aperçu).
    ========================================================================== */
 (function () {
   'use strict';
 
-  // Doit correspondre à --card-w / --card-gap / --safe dans style.css
-  var CARD_W = 248;
-  var CARD_GAP = 24;
-  var SAFE = 48;
   var STAGE_W = 1920;
+  var STAGE_H = 1080;
+  var PAD_X = 64;
 
-  var LONG_PRESS_MS = 550;
-  var STORAGE_FAVORITES = 'x96q.favorites.v1';
-  var STORAGE_LAST = 'x96q.lastFocus.v1';
+  // Doit correspondre à style.css
+  var ROW_METRICS = {
+    dock: { tileW: 270, gap: 32 },
+    apps: { tileW: 230, gap: 28 }
+  };
+
+  var DOCK_SIZE_DEFAULT = 5;
+  var STORAGE_DOCK = 'x96q.dock.v2';
+  var STORAGE_LAST = 'x96q.lastFocus.v2';
+
+  // Applications proposées en priorité dans le dock au premier démarrage.
+  var DOCK_PRIORITY = [
+    /nuvio/i,
+    /youtube\.tv|youtube/i,
+    /smarttube|liskovsoft/i,
+    /netflix/i,
+    /stremio/i,
+    /disney/i,
+    /amazonvideo|primevideo|avod/i,
+    /spotify/i,
+    /plex/i,
+    /cloudstream|lagradost/i,
+    /kodi|xbmc/i,
+    /airscreen/i
+  ];
+
+  // Catégorie affichée dans la scène (badge).
+  var STREAMING = /nuvio|youtube|smarttube|liskovsoft|netflix|stremio|disney|amazonvideo|primevideo|plex|cloudstream|lagradost|kodi|xbmc|molotov|canal|francetv|arte|twitch|vlc|mxtech|hbo|max|paramount|crunchyroll|tivimate|iptv/i;
+  var CATEGORY_LABEL = {
+    video: 'Streaming', audio: 'Musique', game: 'Jeu', image: 'Photos', social: 'Social',
+    news: 'Actualités', maps: 'Navigation', productivity: 'Outils'
+  };
+
+  // ------------------------------------------------------------------ Mise à l'échelle
+
+  /** Ajuste le canevas 1920×1080 à l'écran réel, quelle que soit la densité du boîtier. */
+  function fitStage() {
+    var w = window.innerWidth || document.documentElement.clientWidth || STAGE_W;
+    var h = window.innerHeight || document.documentElement.clientHeight || STAGE_H;
+    var s = Math.min(w / STAGE_W, h / STAGE_H);
+    if (!isFinite(s) || s <= 0) s = 1;
+    document.documentElement.style.zoom = String(s);
+  }
+  fitStage();
+  window.addEventListener('resize', fitStage);
 
   // ------------------------------------------------------------------ Pont natif
 
   var bridge = window.AndroidBridge || createMockBridge();
 
-  function createMockBridge() {
-    // Aperçu dans un navigateur de bureau : données factices.
-    var names = ['YouTube', 'Netflix', 'Prime Video', 'Disney+', 'Plex', 'Kodi', 'VLC', 'Spotify',
-      'Twitch', 'Molotov', 'France tv', 'Arte', 'myCANAL', 'Google Play Store', 'Chrome', 'Fichiers',
-      'Musique', 'Galerie', 'Météo', 'SmartTube', 'Stremio', 'Apple TV', 'Deezer', 'TED'];
-    var apps = names.map(function (n) {
-      return { name: n, packageName: 'com.example.' + n.toLowerCase().replace(/[^a-z0-9]/g, ''), icon: '', isTv: true };
-    });
-    return {
-      getInstalledApps: function () { return JSON.stringify(apps); },
-      launchApp: function (pkg) { console.log('[mock] launchApp', pkg); return true; },
-      openSystemSettings: function () { console.log('[mock] openSystemSettings'); return true; }
-    };
-  }
-
-  // ------------------------------------------------------------------ Stockage
+  // ------------------------------------------------------------------ Utilitaires
 
   function readJson(key, fallback) {
-    try {
-      var raw = window.localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch (e) { return fallback; }
+    try { var raw = window.localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
+    catch (e) { return fallback; }
   }
   function writeJson(key, value) {
-    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* stockage indisponible */ }
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* indisponible */ }
+  }
+
+  function hexToRgb(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return { r: 74, g: 84, b: 104 };
+    var n = parseInt(m[1], 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  }
+  function mix(c, target, t) {
+    return {
+      r: Math.round(c.r + (target.r - c.r) * t),
+      g: Math.round(c.g + (target.g - c.g) * t),
+      b: Math.round(c.b + (target.b - c.b) * t)
+    };
+  }
+  function rgb(c) { return 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')'; }
+  function rgba(c, a) { return 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + a + ')'; }
+
+  var BLACK = { r: 6, g: 7, b: 10 };
+  var WHITE = { r: 255, g: 255, b: 255 };
+
+  function palette(app) {
+    if (app._palette) return app._palette;
+    var base = hexToRgb(app.accentColor);
+    app._palette = {
+      base: base,
+      dark: mix(base, BLACK, 0.45),
+      light: mix(base, WHITE, 0.55)
+    };
+    return app._palette;
   }
 
   // ------------------------------------------------------------------ État
 
   var $ = function (id) { return document.getElementById(id); };
-
   var els = {
-    clock: $('clock'), date: $('date'), settings: $('settingsButton'),
-    heroTile: $('heroTile'), heroIcon: $('heroIcon'), heroText: $('heroText'),
-    heroKicker: $('heroKicker'), heroTitle: $('heroTitle'), heroMeta: $('heroMeta'),
-    heroHints: $('heroHints'), hintPrimary: $('hintPrimary'), hintPin: $('hintPin'),
-    ambientA: $('ambientA'), ambientB: $('ambientB'), toast: $('toast')
+    clock: $('clock'), date: $('date'), settings: $('settings'),
+    heroCopy: $('heroCopy'), heroBadge: $('heroBadge'), heroTitle: $('heroTitle'), heroHint: $('heroHint'),
+    heroPoster: $('heroPoster'), heroBanner: $('heroBanner'), heroIcon: $('heroIcon'), heroGlyph: $('heroGlyph'),
+    ambientA: $('ambientA'), ambientB: $('ambientB'), toast: $('toast'), countApps: $('countApps')
   };
+  els.heroGlyph.appendChild(els.settings.querySelector('svg').cloneNode(true));
 
   var rows = {
-    favorites: { key: 'favorites', el: $('rowFavorites'), track: $('trackFavorites'), count: $('countFavorites'), items: [], cards: [], col: 0 },
-    all:       { key: 'all',       el: $('rowAll'),       track: $('trackAll'),       count: $('countAll'),       items: [], cards: [], col: 0 }
+    dock: { key: 'dock', el: $('rowDock'), track: $('trackDock'), items: [], tiles: [], col: 0 },
+    apps: { key: 'apps', el: $('rowApps'), track: $('trackApps'), items: [], tiles: [], col: 0 }
   };
+  var ROW_ORDER = ['dock', 'apps'];
 
   var state = {
     apps: [],
     byPkg: {},
-    favorites: readJson(STORAGE_FAVORITES, []),
-    zone: 'rows',      // 'top' | 'rows'
-    rowIndex: 0,       // index dans activeRows()
-    focusedCard: null,
+    dock: [],
+    zone: 'dock',          // 'top' | 'dock' | 'apps'
+    focusedTile: null,
     loaded: false
   };
-
-  function activeRows() {
-    var list = [];
-    if (rows.favorites.items.length) list.push(rows.favorites);
-    list.push(rows.all);
-    return list;
-  }
+  var banners = {};        // packageName → data URI ('' = aucune)
 
   // ------------------------------------------------------------------ Horloge
 
-  var timeFmt, dateFmt;
+  var timeFmt = null, dateFmt = null, clockTimer = 0;
   try {
     timeFmt = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' });
     dateFmt = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-  } catch (e) { timeFmt = null; }
+  } catch (e) { /* repli manuel */ }
 
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
-
-  var clockTimer = 0;
   function tick() {
     clearTimeout(clockTimer);
     var now = new Date();
     els.clock.textContent = timeFmt ? timeFmt.format(now) : pad(now.getHours()) + ':' + pad(now.getMinutes());
-    els.clock.setAttribute('datetime', now.toISOString());
-    if (dateFmt) {
-      var d = dateFmt.format(now);
-      els.date.textContent = d.charAt(0).toUpperCase() + d.slice(1); // « Jeudi 12 novembre »
-    }
-    // Recalage sur la minute suivante (pas de timer à la seconde inutile).
+    if (dateFmt) els.date.textContent = dateFmt.format(now);
     clockTimer = setTimeout(tick, 60000 - (now.getSeconds() * 1000 + now.getMilliseconds()) + 50);
   }
 
@@ -115,293 +154,321 @@
     state.byPkg = {};
     list.forEach(function (a) { state.byPkg[a.packageName] = a; });
 
-    // Nettoie les favoris d'apps désinstallées.
-    var cleaned = state.favorites.filter(function (p) { return !!state.byPkg[p]; });
-    if (cleaned.length !== state.favorites.length) {
-      state.favorites = cleaned;
-      writeJson(STORAGE_FAVORITES, cleaned);
-    }
+    var stored = readJson(STORAGE_DOCK, null);
+    var dock = (stored || []).filter(function (p) { return !!state.byPkg[p]; });
+    if (!dock.length) dock = defaultDock(list);           // le dock n'est JAMAIS vide
+    state.dock = dock;
+    writeJson(STORAGE_DOCK, dock);
     state.loaded = true;
   }
 
-  function isFavorite(pkg) { return state.favorites.indexOf(pkg) !== -1; }
+  function defaultDock(list) {
+    var picked = [];
+    DOCK_PRIORITY.forEach(function (re) {
+      if (picked.length >= DOCK_SIZE_DEFAULT) return;
+      for (var i = 0; i < list.length; i++) {
+        var a = list[i];
+        if (picked.indexOf(a.packageName) === -1 && (re.test(a.packageName) || re.test(a.name))) {
+          picked.push(a.packageName);
+          return;
+        }
+      }
+    });
+    // Complète avec les applications TV, puis les autres.
+    [true, false].forEach(function (tv) {
+      list.forEach(function (a) {
+        if (picked.length < DOCK_SIZE_DEFAULT && !!a.isTv === tv && picked.indexOf(a.packageName) === -1) {
+          picked.push(a.packageName);
+        }
+      });
+    });
+    return picked;
+  }
+
+  function inDock(pkg) { return state.dock.indexOf(pkg) !== -1; }
+
+  function categoryLabel(app) {
+    if (CATEGORY_LABEL[app.category]) return CATEGORY_LABEL[app.category];
+    if (STREAMING.test(app.packageName) || STREAMING.test(app.name)) return 'Streaming';
+    return app.isTv ? 'Application TV' : 'Application';
+  }
 
   // ------------------------------------------------------------------ Rendu
 
-  function monogramFor(name) {
-    var span = document.createElement('span');
-    span.className = 'monogram';
-    span.textContent = (name || '?').trim().charAt(0).toUpperCase();
-    return span;
-  }
-
-  function buildCard(app, showPin) {
-    var card = document.createElement('div');
-    card.className = 'card';
-    card.setAttribute('data-pkg', app.packageName);
+  function buildTile(app, showPin) {
+    var p = palette(app);
+    var tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.setAttribute('data-pkg', app.packageName);
 
     var face = document.createElement('div');
-    face.className = 'card-face';
+    face.className = 'tile-face';
+    face.style.backgroundImage = 'linear-gradient(135deg, ' + rgb(p.dark) + ' 0%, #12151E 100%)';
+
     if (app.icon) {
       var img = document.createElement('img');
-      img.className = 'card-icon';
-      img.width = 80; img.height = 80;
+      img.className = 'tile-icon';
       img.alt = '';
-      img.decoding = 'async';
       img.src = app.icon;
       face.appendChild(img);
     } else {
-      face.appendChild(monogramFor(app.name));
+      var mono = document.createElement('span');
+      mono.className = 'tile-monogram';
+      mono.textContent = (app.name || '?').charAt(0).toUpperCase();
+      face.appendChild(mono);
     }
-    if (showPin && isFavorite(app.packageName)) {
+    if (banners[app.packageName]) attachBanner(tile, face, banners[app.packageName]);
+
+    if (showPin && inDock(app.packageName)) {
       var pin = document.createElement('span');
-      pin.className = 'card-pin';
+      pin.className = 'tile-pin';
       face.appendChild(pin);
     }
 
     var label = document.createElement('p');
-    label.className = 'card-label';
+    label.className = 'tile-label';
     label.textContent = app.name;
 
-    card.appendChild(face);
-    card.appendChild(label);
-    return card;
+    tile.appendChild(face);
+    tile.appendChild(label);
+    return tile;
+  }
+
+  function attachBanner(tile, face, uri) {
+    if (tile.classList.contains('has-banner')) return;
+    var b = document.createElement('img');
+    b.className = 'tile-banner';
+    b.alt = '';
+    b.src = uri;
+    face.insertBefore(b, face.firstChild);
+    tile.classList.add('has-banner');
   }
 
   function renderRow(row, items, showPin) {
     row.items = items;
     var frag = document.createDocumentFragment();
-    row.cards = items.map(function (app) {
-      var c = buildCard(app, showPin);
-      frag.appendChild(c);
-      return c;
-    });
+    row.tiles = items.map(function (app) { var t = buildTile(app, showPin); frag.appendChild(t); return t; });
     row.track.textContent = '';
     row.track.appendChild(frag);
-    row.count.textContent = items.length ? String(items.length) : '';
     if (row.col >= items.length) row.col = Math.max(0, items.length - 1);
   }
 
-  function renderSkeleton() {
-    var frag = document.createDocumentFragment();
-    for (var i = 0; i < 7; i++) {
-      var c = document.createElement('div');
-      c.className = 'card is-skeleton';
-      c.innerHTML = '<div class="card-face"></div><p class="card-label"></p>';
-      frag.appendChild(c);
-    }
-    rows.all.track.appendChild(frag);
-  }
-
   function renderAll() {
-    var favApps = state.favorites.map(function (p) { return state.byPkg[p]; }).filter(Boolean);
-    renderRow(rows.favorites, favApps, false);
-    renderRow(rows.all, state.apps, true);
-
-    rows.favorites.el.classList.toggle('is-empty', favApps.length === 0);
+    renderRow(rows.dock, state.dock.map(function (p) { return state.byPkg[p]; }).filter(Boolean), false);
+    renderRow(rows.apps, state.apps, true);
+    els.countApps.textContent = state.apps.length ? String(state.apps.length) : '';
   }
 
-  // ------------------------------------------------------------------ Focus
-
-  function currentRow() {
-    var list = activeRows();
-    if (state.rowIndex >= list.length) state.rowIndex = list.length - 1;
-    if (state.rowIndex < 0) state.rowIndex = 0;
-    return list[state.rowIndex];
+  function renderSkeleton() {
+    ['dock', 'apps'].forEach(function (k) {
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < 7; i++) {
+        var t = document.createElement('div');
+        t.className = 'tile is-skeleton';
+        t.innerHTML = '<div class="tile-face"></div><p class="tile-label"></p>';
+        frag.appendChild(t);
+      }
+      rows[k].track.appendChild(frag);
+    });
   }
 
-  function currentApp() {
-    if (state.zone !== 'rows') return null;
-    var row = currentRow();
-    return row ? row.items[row.col] || null : null;
+  /** Charge les bannières TV en tâche de fond, une par frame, dock d'abord. */
+  var bannerQueue = [];
+  function queueBanners() {
+    if (!bridge.getAppBanner) return;
+    var seen = {};
+    bannerQueue = [];
+    rows.dock.items.concat(rows.apps.items).forEach(function (a) {
+      if (a.isTv && !seen[a.packageName] && banners[a.packageName] === undefined) {
+        seen[a.packageName] = true;
+        bannerQueue.push(a.packageName);
+      }
+    });
+    setTimeout(pumpBanners, 300);
+  }
+  function pumpBanners() {
+    var pkg = bannerQueue.shift();
+    if (!pkg) return;
+    var uri = '';
+    try { uri = bridge.getAppBanner(pkg) || ''; } catch (e) { uri = ''; }
+    banners[pkg] = uri;
+    if (uri) {
+      ['dock', 'apps'].forEach(function (k) {
+        rows[k].tiles.forEach(function (t) {
+          if (t.getAttribute('data-pkg') === pkg) attachBanner(t, t.firstChild, uri);
+        });
+      });
+      if (currentApp() && currentApp().packageName === pkg) updatePoster(currentApp(), false);
+    }
+    setTimeout(pumpBanners, 32);
   }
 
-  function applyFocus(opts) {
-    opts = opts || {};
-    if (state.focusedCard) state.focusedCard.classList.remove('is-focused', 'is-pressed');
+  // ------------------------------------------------------------------ Focus & navigation
+
+  function currentRow() { return state.zone === 'top' ? null : rows[state.zone]; }
+  function currentApp() { var r = currentRow(); return r ? r.items[r.col] || null : null; }
+
+  function applyFocus(repeat) {
+    if (state.focusedTile) state.focusedTile.classList.remove('is-focused', 'is-pressed');
     els.settings.classList.toggle('is-focused', state.zone === 'top');
 
-    var list = activeRows();
-    rows.favorites.el.classList.remove('is-active');
-    rows.all.el.classList.remove('is-active');
-
-    if (state.zone === 'rows') {
-      var row = currentRow();
-      row.el.classList.add('is-active');
-      var card = row.cards[row.col] || null;
-      if (card) card.classList.add('is-focused');
-      state.focusedCard = card;
+    var row = currentRow();
+    if (row) {
+      var tile = row.tiles[row.col] || null;
+      if (tile) tile.classList.add('is-focused');
+      state.focusedTile = tile;
       scrollRow(row);
       var app = row.items[row.col];
-      if (app) writeJson(STORAGE_LAST, { pkg: app.packageName, row: row.key });
+      if (app) writeJson(STORAGE_LAST, { pkg: app.packageName, zone: state.zone });
     } else {
-      state.focusedCard = null;
+      state.focusedTile = null;
     }
-
-    // Les deux rangées sont toujours visibles ; la rangée Favoris vide reste en place (message d'aide).
-    rows.favorites.el.classList.remove('is-hidden');
-    updateHero(!opts.repeat);
-    return list;
+    updateHero(!repeat);
   }
 
-  /** Centre la carte active ; bornes : début aligné sur la safe zone, fin aussi. */
-  function scrollRow(row) {
+  /** Défilement horizontal centré, borné au début et à la fin (translate3d uniquement). */
+  function trackX(row, col) {
+    var m = ROW_METRICS[row.key];
     var n = row.items.length;
-    if (!n) { row.track.style.transform = 'translate3d(0,0,0)'; return; }
-    var trackW = n * CARD_W + (n - 1) * CARD_GAP;
-    var visibleW = STAGE_W - SAFE * 2;
-    var center = row.col * (CARD_W + CARD_GAP) + CARD_W / 2;
-    var x = (STAGE_W / 2 - SAFE) - center;
-    var minX = Math.min(0, visibleW - trackW);
-    if (x > 0) x = 0;
-    if (x < minX) x = minX;
-    row.track.style.transform = 'translate3d(' + Math.round(x) + 'px,0,0)';
+    if (!n) return 0;
+    var trackW = n * m.tileW + (n - 1) * m.gap;
+    var visible = STAGE_W - PAD_X * 2;
+    var center = col * (m.tileW + m.gap) + m.tileW / 2;
+    var x = (STAGE_W / 2 - PAD_X) - center;
+    var minX = Math.min(0, visible - trackW);
+    return Math.round(Math.max(minX, Math.min(0, x)));
+  }
+  function scrollRow(row) {
+    row.track.style.transform = 'translate3d(' + trackX(row, row.col) + 'px,0,0)';
+  }
+
+  /** Colonne de la rangée cible la plus proche horizontalement de la tuile actuelle (comme tvOS). */
+  function nearestCol(fromRow, toRow) {
+    if (!toRow.items.length) return 0;
+    var fm = ROW_METRICS[fromRow.key], tm = ROW_METRICS[toRow.key];
+    var fromCenter = trackX(fromRow, fromRow.col) + fromRow.col * (fm.tileW + fm.gap) + fm.tileW / 2;
+    var best = 0, bestD = Infinity;
+    for (var c = 0; c < toRow.items.length; c++) {
+      var cx = trackX(toRow, c) + c * (tm.tileW + tm.gap) + tm.tileW / 2;
+      var d = Math.abs(cx - fromCenter);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
   }
 
   function moveHorizontal(delta, repeat) {
-    if (state.zone === 'top') return;
     var row = currentRow();
+    if (!row) return;
     var next = row.col + delta;
-    if (next < 0 || next >= row.items.length) { bump(delta); return; }
+    if (next < 0 || next >= row.items.length) { if (!repeat) bump(delta); return; }
     row.col = next;
-    applyFocus({ repeat: repeat });
+    applyFocus(repeat);
   }
 
   function moveVertical(delta, repeat) {
-    var list = activeRows();
     if (state.zone === 'top') {
-      if (delta > 0) { state.zone = 'rows'; state.rowIndex = 0; applyFocus({ repeat: repeat }); }
+      if (delta > 0) { state.zone = 'dock'; applyFocus(repeat); }
       return;
     }
-    var next = state.rowIndex + delta;
-    if (next < 0) { state.zone = 'top'; applyFocus({ repeat: repeat }); return; }
-    if (next >= list.length) { bump(0); return; }
-    state.rowIndex = next;
-    applyFocus({ repeat: repeat });
+    var idx = ROW_ORDER.indexOf(state.zone) + delta;
+    if (idx < 0) { state.zone = 'top'; applyFocus(repeat); return; }
+    if (idx >= ROW_ORDER.length) { if (!repeat) bump(0); return; }
+    var from = rows[state.zone];
+    var to = rows[ROW_ORDER[idx]];
+    if (!to.items.length) return;
+    to.col = nearestCol(from, to);
+    state.zone = to.key;
+    applyFocus(repeat);
   }
 
   function bump(dir) {
-    var card = state.focusedCard;
-    if (!card) return;
+    var tile = state.focusedTile;
+    if (!tile) return;
     var cls = dir < 0 ? 'is-bump-left' : dir > 0 ? 'is-bump-right' : 'is-bump-down';
-    card.classList.remove('is-bump-left', 'is-bump-right', 'is-bump-down');
-    void card.offsetWidth; // relance l'animation
-    card.classList.add(cls);
-    setTimeout(function () { card.classList.remove(cls); }, 180);
+    tile.classList.remove('is-bump-left', 'is-bump-right', 'is-bump-down');
+    void tile.offsetWidth;
+    tile.classList.add(cls);
+    setTimeout(function () { tile.classList.remove(cls); }, 180);
   }
 
-  // ------------------------------------------------------------------ Hero
+  // ------------------------------------------------------------------ Scène héroïque
 
-  var colorCache = {};
+  var heroKey = null;
   var ambientFront = els.ambientA;
   var ambientTimer = 0;
-  var heroPkg = null;
+  var posterTimer = 0;
 
   function updateHero(animate) {
     if (!state.loaded) return;
-
-    if (state.zone === 'top') {
-      setHero({
-        kicker: 'Système', title: 'Paramètres', meta: 'Réseau, affichage, son et applications Android',
-        icon: '', glyph: true, name: 'P', pinned: false, primary: 'Ouvrir', showPin: false, key: '#settings'
-      }, animate);
-      setAmbient(null);
-      return;
-    }
-
     var app = currentApp();
+    var key = app ? app.packageName : '#settings';
+    var changed = key !== heroKey;
+    heroKey = key;
+
     if (!app) {
-      setHero({ kicker: 'Accueil', title: 'Aucune application', meta: 'Installez une application pour la voir ici.',
-        icon: '', name: '—', pinned: false, primary: '', showPin: false, key: '#empty' }, animate);
-      return;
-    }
-    var pinned = isFavorite(app.packageName);
-    setHero({
-      kicker: pinned ? '<span class="is-pinned">Favori</span>' : (app.isTv ? 'Application TV' : 'Application'),
-      title: app.name, meta: app.packageName, icon: app.icon, name: app.name, pinned: pinned,
-      primary: 'Ouvrir', showPin: true, key: app.packageName
-    }, animate);
-
-    clearTimeout(ambientTimer);
-    ambientTimer = setTimeout(function () { setAmbient(app); }, 140); // évite de repeindre pendant un défilement rapide
-  }
-
-  function setHero(h, animate) {
-    var changed = heroPkg !== h.key;
-    heroPkg = h.key;
-
-    els.heroKicker.innerHTML = h.kicker;
-    els.heroTitle.textContent = h.title;
-    els.heroMeta.textContent = h.meta;
-    els.hintPrimary.textContent = h.primary;
-    els.hintPin.textContent = h.pinned ? 'Retirer des favoris' : 'Épingler aux favoris';
-    els.heroHints.children[1].style.display = h.showPin ? '' : 'none';
-    els.heroHints.classList.toggle('is-hidden', !h.primary);
-
-    var old = els.heroTile.querySelector('.monogram, .pill-icon');
-    if (old) old.remove();
-    if (h.icon) {
-      els.heroTile.classList.remove('is-empty');
-      if (els.heroIcon.getAttribute('src') !== h.icon) els.heroIcon.src = h.icon;
+      els.heroCopy.style.setProperty('--accent-light', 'rgba(255,255,255,0.7)');
+      els.heroBadge.textContent = 'Système';
+      els.heroTitle.textContent = 'Paramètres';
+      els.heroHint.textContent = 'Réseau, affichage, son et applications';
+      setPosterGlyph();
+      clearTimeout(ambientTimer);
+      setAmbient(null);
     } else {
-      els.heroTile.classList.add('is-empty');
-      els.heroIcon.removeAttribute('src');
-      els.heroTile.appendChild(h.glyph ? els.settings.querySelector('svg').cloneNode(true) : monogramFor(h.name));
+      var p = palette(app);
+      els.heroCopy.style.setProperty('--accent-light', rgb(p.light));
+      els.heroBadge.textContent = categoryLabel(app);
+      els.heroTitle.textContent = app.name;          // jamais le packageName
+      els.heroHint.textContent = inDock(app.packageName)
+        ? 'Appui long OK • Retirer des favoris'
+        : 'Appui long OK • Épingler aux favoris';
+
+      clearTimeout(posterTimer);
+      // Pendant un défilement rapide, l'affiche attend que la navigation se pose.
+      posterTimer = setTimeout(function () { updatePoster(app, true); }, animate ? 0 : 120);
+      clearTimeout(ambientTimer);
+      ambientTimer = setTimeout(function () { setAmbient(app); }, 120);
     }
 
     if (changed && animate) {
-      els.heroText.classList.remove('is-entering');
-      void els.heroText.offsetWidth;
-      els.heroText.classList.add('is-entering');
+      els.heroCopy.classList.remove('is-entering');
+      void els.heroCopy.offsetWidth;
+      els.heroCopy.classList.add('is-entering');
     }
   }
 
-  /** Couleur moyenne (pixels opaques, ni trop clairs ni trop sombres) de l'icône 96 px. */
-  function dominantColor(app, cb) {
-    if (colorCache[app.packageName] !== undefined) { cb(colorCache[app.packageName]); return; }
-    if (!app.icon) { colorCache[app.packageName] = null; cb(null); return; }
-    var img = new Image();
-    img.onload = function () {
-      try {
-        var size = 16;
-        var canvas = document.createElement('canvas');
-        canvas.width = size; canvas.height = size;
-        var ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, size, size);
-        var d = ctx.getImageData(0, 0, size, size).data;
-        var r = 0, g = 0, b = 0, n = 0;
-        for (var i = 0; i < d.length; i += 4) {
-          if (d[i + 3] < 200) continue;
-          var max = Math.max(d[i], d[i + 1], d[i + 2]), min = Math.min(d[i], d[i + 1], d[i + 2]);
-          if (max < 32 || min > 224) continue;           // ignore noir/blanc
-          var sat = max - min;
-          var w = 1 + sat / 32;                           // favorise les pixels saturés
-          r += d[i] * w; g += d[i + 1] * w; b += d[i + 2] * w; n += w;
-        }
-        var color = n ? 'rgb(' + Math.round(r / n) + ',' + Math.round(g / n) + ',' + Math.round(b / n) + ')' : null;
-        colorCache[app.packageName] = color;
-        cb(color);
-      } catch (e) { colorCache[app.packageName] = null; cb(null); }
-    };
-    img.onerror = function () { colorCache[app.packageName] = null; cb(null); };
-    img.src = app.icon;
+  function updatePoster(app, animate) {
+    if (currentApp() !== app) return;
+    var p = palette(app);
+    var poster = els.heroPoster;
+    poster.className = 'hero-poster';
+    poster.style.backgroundImage = 'linear-gradient(135deg, ' + rgb(p.dark) + ' 0%, #12151E 100%)';
+    var uri = banners[app.packageName];
+    if (uri) {
+      if (els.heroBanner.getAttribute('src') !== uri) els.heroBanner.src = uri;
+      poster.classList.add('has-banner');
+    } else if (app.icon) {
+      if (els.heroIcon.getAttribute('src') !== app.icon) els.heroIcon.src = app.icon;
+      poster.classList.add('has-icon');
+    }
+    if (animate) { void poster.offsetWidth; poster.classList.add('is-entering'); }
+  }
+
+  function setPosterGlyph() {
+    clearTimeout(posterTimer);
+    els.heroPoster.className = 'hero-poster has-glyph';
+    els.heroPoster.style.backgroundImage = 'linear-gradient(135deg, #252A36 0%, #12151E 100%)';
   }
 
   function setAmbient(app) {
     var back = ambientFront === els.ambientA ? els.ambientB : els.ambientA;
-    if (!app) {
-      ambientFront.classList.remove('is-visible');
-      return;
-    }
-    dominantColor(app, function (color) {
-      if (currentApp() !== app) return;
-      if (!color) { ambientFront.classList.remove('is-visible'); return; }
-      // Halo plat, peint une seule fois par couleur ; seule l'opacité est ensuite animée.
-      back.style.background = 'radial-gradient(closest-side, ' + color + ', rgba(7,8,12,0))';
-      back.classList.add('is-visible');
-      ambientFront.classList.remove('is-visible');
-      ambientFront = back;
-    });
+    if (!app) { ambientFront.classList.remove('is-visible'); return; }
+    var c = palette(app).base;
+    // Fondu complet avant la moitié de l'écran et avant le dock : le bas reste noir profond.
+    back.style.backgroundImage =
+      'radial-gradient(ellipse 960px 620px at 100% 0%, ' + rgba(c, 1) + ' 0%, ' + rgba(c, 0.35) + ' 45%, ' + rgba(c, 0) + ' 100%)';
+    back.classList.add('is-visible');
+    ambientFront.classList.remove('is-visible');
+    ambientFront = back;
   }
 
   // ------------------------------------------------------------------ Actions
@@ -411,7 +478,7 @@
     els.toast.textContent = msg;
     els.toast.classList.add('is-visible');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { els.toast.classList.remove('is-visible'); }, 1600);
+    toastTimer = setTimeout(function () { els.toast.classList.remove('is-visible'); }, 1800);
   }
 
   function activate() {
@@ -421,10 +488,10 @@
     }
     var app = currentApp();
     if (!app) return;
-    var card = state.focusedCard;
-    if (card) {
-      card.classList.add('is-pressed');
-      setTimeout(function () { card.classList.remove('is-pressed'); }, 140);
+    var tile = state.focusedTile;
+    if (tile) {
+      tile.classList.add('is-pressed');
+      setTimeout(function () { tile.classList.remove('is-pressed'); }, 140);
     }
     var ok = false;
     try { ok = bridge.launchApp(app.packageName); } catch (e) { ok = false; }
@@ -435,31 +502,25 @@
     var app = currentApp();
     if (!app) return;
     var pkg = app.packageName;
-    var row = currentRow();
-    var wasFavRow = row === rows.favorites;
 
-    if (isFavorite(pkg)) {
-      state.favorites = state.favorites.filter(function (p) { return p !== pkg; });
-      toast('Retiré des favoris');
+    if (inDock(pkg)) {
+      if (state.dock.length <= 1) { toast('Le dock garde au moins une application'); return; }
+      state.dock = state.dock.filter(function (p) { return p !== pkg; });
+      toast(app.name + ' retiré des favoris');
     } else {
-      state.favorites = state.favorites.concat(pkg);
-      toast('Épinglé aux favoris');
+      state.dock = state.dock.concat(pkg);
+      toast(app.name + ' épinglé aux favoris');
     }
-    writeJson(STORAGE_FAVORITES, state.favorites);
+    writeJson(STORAGE_DOCK, state.dock);
 
+    var zone = state.zone;
     renderAll();
-    // Garder le focus sur la même application, quelle que soit la rangée.
-    var list = activeRows();
-    if (wasFavRow) {
-      if (!rows.favorites.items.length) {
-        state.rowIndex = list.indexOf(rows.all);
-        rows.all.col = Math.max(0, indexOfPkg(rows.all, pkg));
-      }
-    } else {
-      state.rowIndex = list.indexOf(rows.all);
+    if (zone === 'apps') {
+      var i = indexOfPkg(rows.apps, pkg);
+      if (i >= 0) rows.apps.col = i;
     }
-    heroPkg = null;
-    applyFocus();
+    heroKey = null;
+    applyFocus(false);
   }
 
   function indexOfPkg(row, pkg) {
@@ -467,114 +528,88 @@
     return -1;
   }
 
-  /** RETOUR : ne quitte jamais, ramène progressivement au début. */
+  /** RETOUR : jamais de sortie. Apps → dock ; dock → première tuile ; Paramètres → dock. */
   function onBack() {
-    if (state.zone === 'top') { state.zone = 'rows'; state.rowIndex = 0; applyFocus(); return; }
-    var row = currentRow();
-    if (row.col > 0) { row.col = 0; applyFocus(); return; }
-    if (state.rowIndex > 0) { state.rowIndex = 0; applyFocus(); return; }
+    if (state.zone === 'top') { state.zone = 'dock'; applyFocus(false); return; }
+    if (state.zone === 'apps') { rows.dock.col = nearestCol(rows.apps, rows.dock); state.zone = 'dock'; applyFocus(false); return; }
+    if (rows.dock.col > 0) { rows.dock.col = 0; applyFocus(false); return; }
     bump(-1);
   }
 
   function onHome() {
-    state.zone = 'rows';
-    state.rowIndex = 0;
-    rows.favorites.col = 0;
-    rows.all.col = 0;
-    applyFocus();
+    state.zone = 'dock';
+    rows.dock.col = 0;
+    rows.apps.col = 0;
+    scrollRow(rows.apps);
+    applyFocus(false);
   }
 
   function reload() {
-    var pkg = currentApp() && currentApp().packageName;
-    var rowKey = state.zone === 'rows' ? currentRow().key : null;
+    var app = currentApp();
+    var pkg = app && app.packageName;
+    var zone = state.zone;
     loadApps();
     renderAll();
-    restoreFocus(pkg, rowKey);
-    heroPkg = null;
-    applyFocus();
-  }
-
-  function restoreFocus(pkg, rowKey) {
-    var list = activeRows();
-    var row = rowKey === 'favorites' && rows.favorites.items.length ? rows.favorites : (rowKey ? rows.all : list[0]);
-    state.rowIndex = Math.max(0, list.indexOf(row));
-    if (pkg) {
-      var i = indexOfPkg(row, pkg);
+    if (zone !== 'top') {
+      var row = rows[zone];
+      var i = pkg ? indexOfPkg(row, pkg) : -1;
       if (i >= 0) row.col = i;
     }
+    scrollRow(rows.dock);
+    scrollRow(rows.apps);
+    heroKey = null;
+    applyFocus(false);
+    queueBanners();
   }
 
-  // ------------------------------------------------------------------ Clavier
+  // ------------------------------------------------------------------ Entrée télécommande
 
-  var enterDownAt = 0;
-  var enterTimer = 0;
-  var enterConsumed = false;
+  window.onRemoteKey = function (name, repeat) {
+    if (!state.loaded) return;
+    repeat = !!repeat;
+    switch (name) {
+      case 'ArrowLeft':  moveHorizontal(-1, repeat); break;
+      case 'ArrowRight': moveHorizontal(1, repeat); break;
+      case 'ArrowUp':    moveVertical(-1, repeat); break;
+      case 'ArrowDown':  moveVertical(1, repeat); break;
+      case 'Enter':      activate(); break;
+      case 'LongEnter':
+      case 'Menu':       togglePin(); break;
+      case 'Back':       onBack(); break;
+    }
+  };
 
-  function isEnter(e) {
-    return e.key === 'Enter' || e.key === 'Select' || e.keyCode === 13 || e.keyCode === 23;
-  }
-
+  // Clavier : utilisé seulement hors Android (aperçu navigateur). Sur le boîtier, MainActivity
+  // intercepte toutes les touches avant la WebView.
+  var kbEnterTimer = 0, kbEnterDown = false, kbEnterLong = false;
   document.addEventListener('keydown', function (e) {
-    if (!state.loaded) { e.preventDefault(); return; }
-    var repeat = !!e.repeat;
-
-    if (isEnter(e)) {
+    var k = e.key;
+    if (k === 'Enter' || e.keyCode === 13) {
       e.preventDefault();
-      if (repeat || enterDownAt) return;
-      enterDownAt = Date.now();
-      enterConsumed = false;
-      if (state.zone === 'rows') {
-        enterTimer = setTimeout(function () { enterConsumed = true; togglePin(); }, LONG_PRESS_MS);
-      }
+      if (kbEnterDown) return;
+      kbEnterDown = true; kbEnterLong = false;
+      kbEnterTimer = setTimeout(function () { kbEnterLong = true; window.onRemoteKey('LongEnter', false); }, 550);
       return;
     }
-
-    switch (e.key) {
-      case 'ArrowLeft':  e.preventDefault(); moveHorizontal(-1, repeat); break;
-      case 'ArrowRight': e.preventDefault(); moveHorizontal(1, repeat); break;
-      case 'ArrowUp':    e.preventDefault(); moveVertical(-1, repeat); break;
-      case 'ArrowDown':  e.preventDefault(); moveVertical(1, repeat); break;
-      case 'Backspace':
-      case 'Escape':
-      case 'GoBack':
-      case 'BrowserBack':
-        e.preventDefault(); if (!repeat) onBack(); break;
-      case 'ContextMenu':
-      case 'p':
-        e.preventDefault(); if (!repeat) togglePin(); break;
-    }
+    var map = { ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+      Escape: 'Back', Backspace: 'Back', GoBack: 'Back', ContextMenu: 'Menu', m: 'Menu' };
+    if (map[k]) { e.preventDefault(); window.onRemoteKey(map[k], e.repeat); }
   }, true);
-
   document.addEventListener('keyup', function (e) {
-    if (!isEnter(e)) return;
+    if (!(e.key === 'Enter' || e.keyCode === 13)) return;
     e.preventDefault();
-    clearTimeout(enterTimer);
-    var wasDown = enterDownAt;
-    enterDownAt = 0;
-    if (wasDown && !enterConsumed) activate();
+    clearTimeout(kbEnterTimer);
+    if (kbEnterDown && !kbEnterLong) window.onRemoteKey('Enter', false);
+    kbEnterDown = false;
   }, true);
 
-  // Pas de souris sur TV, mais clic utile pour l'aperçu dans un navigateur.
-  document.addEventListener('click', function (e) {
-    var card = e.target.closest && e.target.closest('.card');
-    if (e.target.closest && e.target.closest('#settingsButton')) { state.zone = 'top'; applyFocus(); activate(); return; }
-    if (!card) return;
-    var list = activeRows();
-    for (var r = 0; r < list.length; r++) {
-      var i = list[r].cards.indexOf(card);
-      if (i >= 0) { state.zone = 'rows'; state.rowIndex = r; list[r].col = i; applyFocus(); activate(); return; }
-    }
-  });
-
-  window.addEventListener('blur', function () { clearTimeout(enterTimer); enterDownAt = 0; });
-
-  // ------------------------------------------------------------------ API appelée par le natif
+  // ------------------------------------------------------------------ API native
 
   window.Launcher = {
     onBack: onBack,
     onHome: onHome,
     onMenu: togglePin,
-    onResume: function () { clearTimeout(enterTimer); enterDownAt = 0; tick(); },
+    onResume: function () { tick(); fitStage(); },
     reload: reload
   };
 
@@ -583,18 +618,71 @@
   function start() {
     tick();
     renderSkeleton();
-    // Deux frames : le squelette est peint avant l'appel (potentiellement long) au pont natif.
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
         loadApps();
         renderAll();
         var last = readJson(STORAGE_LAST, null);
-        restoreFocus(last && last.pkg, last && last.row);
-        applyFocus();
+        if (last && (last.zone === 'dock' || last.zone === 'apps')) {
+          var i = indexOfPkg(rows[last.zone], last.pkg);
+          if (i >= 0) { state.zone = last.zone; rows[last.zone].col = i; }
+        }
+        scrollRow(rows.dock);
+        scrollRow(rows.apps);
+        applyFocus(false);
+        queueBanners();
       });
     });
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
+
+  // ------------------------------------------------------------------ Aperçu navigateur
+
+  function createMockBridge() {
+    var demo = [
+      ['NuvioTV', 'com.nuvio.tv', '#7B5CFF', 1], ['YouTube', 'com.google.android.youtube.tv', '#FF0000', 1],
+      ['Netflix', 'com.netflix.ninja', '#E50914', 1], ['AirScreen', 'com.ionitech.airscreen', '#2FB8A6', 1],
+      ['Stremio', 'com.stremio.one', '#8A5AF0', 1], ['Spotify', 'com.spotify.tv.android', '#1DB954', 1],
+      ['Disney+', 'com.disney.disneyplus', '#113CCF', 1], ['Prime Video', 'com.amazon.amazonvideo.livingroom', '#1A98FF', 1],
+      ['CloudStream', 'com.lagradost.cloudstream3', '#3D7BF7', 0], ['Kodi', 'org.xbmc.kodi', '#17B2E7', 1],
+      ['VLC', 'org.videolan.vlc', '#FF8800', 1], ['Plex', 'com.plexapp.android', '#E5A00D', 1],
+      ['Chrome', 'com.android.chrome', '#4285F4', 0], ['Fichiers', 'com.android.documentsui', '#4A5468', 0],
+      ['Google Play Store', 'com.android.vending', '#01875F', 1], ['Twitch', 'tv.twitch.android.app', '#9146FF', 1],
+      ['SmartTube', 'com.liskovsoft.smarttubetv.beta', '#E62117', 1], ['Météo', 'com.example.weather', '#3A8DDE', 0]
+    ];
+    function iconFor(name, color) {
+      var c = document.createElement('canvas'); c.width = c.height = 128;
+      var x = c.getContext('2d');
+      x.fillStyle = color; x.beginPath();
+      if (x.roundRect) x.roundRect(0, 0, 128, 128, 30); else x.rect(0, 0, 128, 128);
+      x.fill();
+      x.fillStyle = '#fff'; x.font = '800 64px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(name.charAt(0), 64, 68);
+      return c.toDataURL('image/png');
+    }
+    function bannerFor(name, color) {
+      var c = document.createElement('canvas'); c.width = 480; c.height = 270;
+      var x = c.getContext('2d');
+      x.fillStyle = '#0B0C10'; x.fillRect(0, 0, 480, 270);
+      x.fillStyle = color; x.font = '800 64px Inter, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(name, 240, 140);
+      return c.toDataURL('image/png');
+    }
+    var apps = demo.map(function (d) {
+      return { name: d[0], packageName: d[1], accentColor: d[2], isTv: !!d[3], category: '', icon: iconFor(d[0], d[2]) };
+    }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+    var withBanner = { 'com.google.android.youtube.tv': 1, 'com.netflix.ninja': 1, 'com.disney.disneyplus': 1, 'com.spotify.tv.android': 1 };
+    return {
+      getInstalledApps: function () { return JSON.stringify(apps); },
+      getAppBanner: function (pkg) {
+        if (!withBanner[pkg]) return '';
+        var a = apps.filter(function (x) { return x.packageName === pkg; })[0];
+        return bannerFor(a.name, a.accentColor);
+      },
+      launchApp: function (pkg) { console.log('[aperçu] launchApp', pkg); return true; },
+      openSystemSettings: function () { console.log('[aperçu] openSystemSettings'); return true; }
+    };
+  }
 })();
