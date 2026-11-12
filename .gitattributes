@@ -1,0 +1,5 @@
+# Le script gradlew DOIT garder des fins de ligne LF, même si le dépôt est créé sous Windows.
+gradlew       text eol=lf
+*.bat         text eol=crlf
+*.jar         binary
+*.woff2       binary

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bannière Leanback 320x180 (16:9) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp" android:height="180dp"
+    android:viewportWidth="320" android:viewportHeight="180">
+    <path android:fillColor="#07080C" android:pathData="M0,0h320v180h-320z" />
+    <path android:fillColor="#F2F3F5" android:pathData="M40,64h96v6h-96z M40,87h64v6h-64z M40,110h96v6h-96z" />
+    <path android:fillColor="#6E7482" android:pathData="M248,64h32v52h-32z" />
+</vector>

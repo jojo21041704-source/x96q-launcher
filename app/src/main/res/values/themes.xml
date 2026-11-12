@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Plein écran, sans barre de titre, fond identique à l'UI pour éviter tout flash blanc. -->
+    <style name="Theme.Launcher" parent="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/launcher_bg</item>
+        <item name="android:colorBackground">@color/launcher_bg</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowShowWallpaper">false</item>
+    </style>
+    <color name="launcher_bg">#FF07080C</color>
+</resources>
